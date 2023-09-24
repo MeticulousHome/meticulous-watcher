@@ -115,7 +115,7 @@ pipe2 = None
 pipe2_path = f'{IPC_path}/pipe2'
 pipe1_path = f'{IPC_path}/pipe1'
 backAlive = False
-message = bytes()
+IPC_message = bytes()
 backend_time_off = 5   #seconds the backend is allowed to be offline in one occurrence
 read_back_thread = None
 
@@ -164,7 +164,7 @@ def checkPipes():
 # This function kepps track that the backend is still alive or not and
 # updates the flag accordignly. It contains no logic to handle any case
 def readBackend():
-    global message
+    global IPC_message
     global backAlive
     global continueUpdate
     global pipe2
@@ -177,22 +177,21 @@ def readBackend():
 
     while True:
         if pipe2 != None:
-            message = os.read(pipe1, 1024)
-            if message:
+            IPC_message = os.read(pipe2, 1024)
+            if IPC_message:
                 backAlive = True
-                if len(message) > 3:
-                    continueUpdate = message.decode() == "released"
-            else:
-                backAlive = False
+                if len(IPC_message) > 3:
+                    if IPC_message.decode() == "released":
+                        continueUpdate = True
 
 #This functions checks if the backend has been offline more than it should
 def backendFail():
     global updating
-    if backAlive:
-        return False
-    else:
-        time.sleep(backend_time_off)
-        return (not backAlive) and (not updating)
+    global backAlive
+
+    _backAlive = backAlive
+    backAlive = False
+    return (not _backAlive) and (not updating)
 
 # This function checks if the failure was not isolated (this must be a task in a thread)
 def backendDead():
@@ -200,6 +199,7 @@ def backendDead():
     restarts_done = 0
 
     while True:
+        time.sleep(backend_time_off)
         if backendFail():
             failure_count = failure_count + 1
         else:
@@ -304,6 +304,7 @@ def startUpdate():
     subprocess.run("systemctl start back",shell=True,capture_output=True,text=True,cwd=user_path)
 
     updating = False
+    continueUpdate = False
 
 
 def main():
