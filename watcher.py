@@ -85,17 +85,14 @@ class UploadHandler(tornado.web.RequestHandler):
         if computed_sha == received_sha:
             self.set_status(200)
             self.write("File received and verified successfully!")
-            add_to_buffer("Update File received")
             with open(os.path.expanduser("~/update/updtPckg.tar.gz"), 'wb') as file:
                 file.write(received_file)
-            add_to_buffer("File saved, starting update process")
             updating = True
             tr = threading.Thread(target=startUpdate)
             tr.start()
         else:
             self.set_status(400)
             self.write("sha checksum mismatch!")
-            add_to_buffer("File received erroneusly")
         
     def options(self):
         global stopESPcomm
