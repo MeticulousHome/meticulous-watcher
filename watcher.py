@@ -158,6 +158,8 @@ def checkPipes():
 
 ##### BACKEND CHECKER
 
+backend_checker_thread = None
+
 # This function kepps track that the backend is still alive or not and
 # updates the flag accordignly. It contains no logic to handle any case
 def readBackend():
@@ -173,9 +175,14 @@ def readBackend():
         pipe2 = None
 
     while True:
+        time.sleep(1)
         if pipe2 != None:
-            IPC_message = os.read(pipe2, 1024)
+            try:
+                IPC_message = os.read(pipe2, 1024)
+            except OSError as e:
+                print(f'error reading pipe2: {e}')
             if IPC_message:
+                print(f'message received from backend: {IPC_message.decode()}')
                 backAlive = True
                 if len(IPC_message) > 3:
                     if IPC_message.decode() == "released":
@@ -188,6 +195,7 @@ def backendFail():
 
     _backAlive = backAlive
     backAlive = False
+    print(f'backend is alive: {_backAlive}')
     return (not _backAlive) and (not updating)
 
 # This function checks if the failure was not isolated (this must be a task in a thread)
@@ -197,7 +205,9 @@ def backendDead():
 
     while True:
         time.sleep(backend_time_off)
+        print("backend checker tick")
         if backendFail():
+            print("backend not responding")
             failure_count = failure_count + 1
         else:
             failure_count = 0
@@ -207,6 +217,7 @@ def backendDead():
             # We restart the backend up to 3 times
             if restarts_done < 3:
                 restarts_done = restarts_done + 1
+                print("trying to restart the backend")
                 subprocess.run("systemctl stop back",shell=True,capture_output=True,text=True,cwd=user_path)
                 time.sleep(1)
                 subprocess.run("systemctl start back",shell=True,capture_output=True,text=True,cwd=user_path)
@@ -248,7 +259,7 @@ def lil_back(notify:str):
 
 ##################################################################################################################
 # UPDATE HANDLERS
-autoupdate_path = "./update/Script" 
+autoupdate_path = "./update/meticulous/UpdateScript" 
 updating = False
 continueUpdate = False
 
@@ -306,7 +317,7 @@ def startUpdate():
 
 def main():
     global read_back_thread
-
+    print()
     parse_command_line()
 
     #opens the pipes to chat with backend
@@ -316,6 +327,9 @@ def main():
     read_back_thread = threading.Thread(target=readBackend)
     read_back_thread.start()
 
+    #starts the thread that checks if the backend is live
+    backend_checker_thread = threading.Thread(target=backendDead)
+    backend_checker_thread.start()
 
     app = tornado.web.Application(
         [
