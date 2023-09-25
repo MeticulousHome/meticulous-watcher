@@ -113,7 +113,7 @@ pipe2_path = f'{IPC_path}/pipe2'
 pipe1_path = f'{IPC_path}/pipe1'
 backAlive = False
 IPC_message = bytes()
-backend_time_off = 5   #seconds the backend is allowed to be offline in one occurrence
+backend_time_off = 2   #seconds the backend is allowed to be offline in one occurrence
 read_back_thread = None
 
 #this function creates the pipes to allow communication between backend and the watcher
@@ -159,7 +159,8 @@ def checkPipes():
 ##### BACKEND CHECKER
 
 backend_checker_thread = None
-
+lil_app = None
+lil_sio = None
 # This function kepps track that the backend is still alive or not and
 # updates the flag accordignly. It contains no logic to handle any case
 def readBackend():
@@ -214,42 +215,31 @@ def backendDead():
 
         if failure_count > 4:
             failure_count = 0
-            # We restart the backend up to 3 times
-            if restarts_done < 3:
-                restarts_done = restarts_done + 1
-                print("trying to restart the backend")
-                subprocess.run("systemctl stop back",shell=True,capture_output=True,text=True,cwd=user_path)
-                time.sleep(1)
-                subprocess.run("systemctl start back",shell=True,capture_output=True,text=True,cwd=user_path)
-            #if we have tried to restart the back 3 times and still dead
-            else:
 
-                #stop the back as we will need the por 8080 to be free, just making sure of it
-                subprocess.run("systemctl stop back",shell=True,capture_output=True,text=True,cwd=user_path)
+            #stop the back as we will need the por 8080 to be free, just making sure of it
+            subprocess.run("systemctl stop back",shell=True,capture_output=True,text=True,cwd=user_path)
 
-                #launch the little back to notify the need to restart / upgrade the machine
-                lil_back("fail")
+            #launch the little back to notify the need to restart / upgrade the machine
+            lil_back("fail")
 
             #Notify the user to restart the Meticulous or upload software
             #START LIL BACKEND
             #NOTIFY USER TO RESTART OR UPLOAD
 
 # This function boots the lil back to advise the user a problem has occured and ask for a restart or update
-def lil_back(notify:str):
+def lil_back(ServApp:tornado.web.Application, notify:str):
+    global lil_app
+    global lil_sio
+
+    lil_app = ServApp
     # create a new HTTP aplication in the server the back should have been
-    lil_sio = socketio.AsyncServer(cors_allowed_origins='*', async_mode='tornado')
+    if lil_sio == None:
+        lil_sio = socketio.AsyncServer(cors_allowed_origins='*', async_mode='tornado')
+    lil_app.add
 
-    #serves the app for socket communication 
-    lil_app = tornado.web.Application(
-        [
-            (r"/socket.io/", socketio.get_tornado_handler(lil_sio)),
-        ],
-    )
-
-    time.sleep(2)
-    
-    #on the port that the backend was using
-    lil_app.listen(8080)
+    print(f'lil back created with object to nofity: {notify}')
+    print(f'socket connection: {lil_sio}, on application {lil_app}')
+    time.sleep(1)
 
     #notifies the frontend that the backend failed
     if notify == "fail":
@@ -262,6 +252,7 @@ def lil_back(notify:str):
 autoupdate_path = "./update/meticulous/UpdateScript" 
 updating = False
 continueUpdate = False
+app = None
 
 #This function creates the update directory where the file will be stored and extracted
 def createUpdateDir():
@@ -314,9 +305,9 @@ def startUpdate():
     updating = False
     continueUpdate = False
 
-
 def main():
     global read_back_thread
+    global app
     print()
     parse_command_line()
 
