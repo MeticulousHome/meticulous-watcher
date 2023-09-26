@@ -111,7 +111,6 @@ pipe1 = None
 pipe2 = None
 pipe2_path = f'{IPC_path}/pipe2'
 pipe1_path = f'{IPC_path}/pipe1'
-backAlive = False
 IPC_message = bytes()
 backend_time_off = 2   #seconds the backend is allowed to be offline in one occurrence
 read_back_thread = None
@@ -159,8 +158,9 @@ def checkPipes():
 ##### BACKEND CHECKER
 
 backend_checker_thread = None
-lil_app = None
-lil_sio = None
+backAlive = False
+backend_dead = False
+sio = None
 # This function kepps track that the backend is still alive or not and
 # updates the flag accordignly. It contains no logic to handle any case
 def readBackend():
@@ -201,8 +201,8 @@ def backendFail():
 
 # This function checks if the failure was not isolated (this must be a task in a thread)
 def backendDead():
+    global backend_dead
     failure_count = 0
-    restarts_done = 0
 
     while True:
         time.sleep(backend_time_off)
@@ -219,33 +219,26 @@ def backendDead():
             #stop the back as we will need the por 8080 to be free, just making sure of it
             subprocess.run("systemctl stop back",shell=True,capture_output=True,text=True,cwd=user_path)
 
-            #launch the little back to notify the need to restart / upgrade the machine
-            lil_back("fail")
+            # sets the flag to indificate the backend is dead
+            backend_dead = True
 
             #Notify the user to restart the Meticulous or upload software
             #START LIL BACKEND
             #NOTIFY USER TO RESTART OR UPLOAD
+    
+async def eventEmitter():
+    global sio
+    global update_finished
+    event_refresh_period = 2 #emit the notification every 2 seconds
 
-# This function boots the lil back to advise the user a problem has occured and ask for a restart or update
-def lil_back(ServApp:tornado.web.Application, notify:str):
-    global lil_app
-    global lil_sio
+    while True:
+        if(backend_dead): await sio.emit('message', 'Something has happened, please reboot your Meticulous or update the software. If the problem persist, please contact us')
+        if(update_finished):
+            update_finished = False
+            await sio.emit('message','The update has finished. Happy brewing!')
+        await sio.sleep(event_refresh_period)
 
-    lil_app = ServApp
-    # create a new HTTP aplication in the server the back should have been
-    if lil_sio == None:
-        lil_sio = socketio.AsyncServer(cors_allowed_origins='*', async_mode='tornado')
-    lil_app.add
 
-    print(f'lil back created with object to nofity: {notify}')
-    print(f'socket connection: {lil_sio}, on application {lil_app}')
-    time.sleep(1)
-
-    #notifies the frontend that the backend failed
-    if notify == "fail":
-        asyncio.run(lil_sio.emit("BACKEND_FAIL"))
-    if notify == "update":
-        asyncio.run(lil_sio.emit("MANUAL-REBOOT"))
 
 ##################################################################################################################
 # UPDATE HANDLERS
@@ -253,6 +246,7 @@ autoupdate_path = "./update/meticulous/UpdateScript"
 updating = False
 continueUpdate = False
 app = None
+update_finished = False
 
 #This function creates the update directory where the file will be stored and extracted
 def createUpdateDir():
@@ -268,7 +262,7 @@ def createUpdateDir():
 #This function starts the update process
 def startUpdate():
 
-    global reboot_flag
+    global update_finished
     global continueUpdate
     global updating
 
@@ -304,11 +298,13 @@ def startUpdate():
 
     updating = False
     continueUpdate = False
+    update_finished = True
 
 def main():
     global read_back_thread
     global app
-    print()
+    global sio
+
     parse_command_line()
 
     #opens the pipes to chat with backend
@@ -322,13 +318,19 @@ def main():
     backend_checker_thread = threading.Thread(target=backendDead)
     backend_checker_thread.start()
 
+    sio = socketio.AsyncServer(cors_allowed_origins='*', async_mode='tornado')
+
+
     app = tornado.web.Application(
         [
             (r"/update", UploadHandler),
+            (r"/socket.io/", socketio.get_tornado_handler(sio)),
         ],
     )
 
     app.listen(options.port)
+
+    sio.start_background_task(eventEmitter)
     tornado.ioloop.IOLoop.current().start()
 
 
