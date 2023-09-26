@@ -77,6 +77,7 @@ class UploadHandler(tornado.web.RequestHandler):
 
     def put(self):
         global updating
+        global message_sent
         received_file = self.request.body
         received_sha = self.request.headers.get('Content-MD5')
 
@@ -161,6 +162,7 @@ backend_checker_thread = None
 backAlive = False
 backend_dead = False
 sio = None
+message_sent = False
 # This function kepps track that the backend is still alive or not and
 # updates the flag accordignly. It contains no logic to handle any case
 def readBackend():
@@ -229,10 +231,13 @@ def backendDead():
 async def eventEmitter():
     global sio
     global update_finished
+    global message_sent
     event_refresh_period = 2 #emit the notification every 2 seconds
 
     while True:
-        if(backend_dead): await sio.emit('message', 'Something has happened, please reboot your Meticulous or update the software. If the problem persist, please contact us')
+        if(backend_dead and not message_sent):
+            message_sent = True
+            await sio.emit('message', 'Something has happened, please reboot your Meticulous or update the software. If the problem persist, please contact us')
         if(update_finished):
             update_finished = False
             await sio.emit('message','The update has finished. Happy brewing!')
@@ -278,15 +283,13 @@ def startUpdate():
     command = f'sudo rm {path}'
     subprocess.run(command, shell=True,cwd=user_path)
 
-    # ASK BACKEND TO FREE RESOURCES
-    with open(pipe1_path, 'w') as pipe:
-        pipe.write("FREE")
-    # WAIT FOR THE BACKEND CONFIRMATION THAT RESOURCES ARE FREED (and its dead)
-    while not continueUpdate:
-        pass
+    # KILL BACKEND
+    subprocess.run("systemctl stop back",shell=True)
 
     #call the update script that will be provided in the update pckg
     command = f'python3 {autoupdate_path}/update_protocol.py'
+
+    print("actualizando")
     update_success = subprocess.run(command, shell=True, capture_output=True, text=True,cwd=user_path).stdout
 
     print(update_success)
@@ -295,7 +298,8 @@ def startUpdate():
     subprocess.run("systemctl stop back",shell=True,capture_output=True,text=True,cwd=user_path)
     time.sleep(1)
     subprocess.run("systemctl start back",shell=True,capture_output=True,text=True,cwd=user_path)
-
+    time.sleep(3)
+    message_sent = False
     updating = False
     continueUpdate = False
     update_finished = True
