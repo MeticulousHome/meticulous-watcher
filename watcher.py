@@ -49,18 +49,26 @@
 
 
 from tornado.options import define, options, parse_command_line
-import socketio
 import tornado.web
 import tornado.ioloop
 import hashlib
-import base64
 import os
 import subprocess
 import time
 import threading
 import traceback
+import stat
+import socketio
+import asyncio
 
-# CLASS DEFINITION
+user_path=os.path.expanduser("~/")
+
+##################################################################################################################
+##################################################################################################################
+##################################################################################################################
+##################################################################################################################
+##################################################################################################################
+# HTTP SERVER HANDLING
 class UploadHandler(tornado.web.RequestHandler):
     def set_default_headers(self):
         self.set_header("Access-Control-Allow-Origin", "http://192.168.50.10:3000")     #allows requests from the dashboard
@@ -69,6 +77,7 @@ class UploadHandler(tornado.web.RequestHandler):
 
     def put(self):
         global updating
+        global message_sent
         received_file = self.request.body
         received_sha = self.request.headers.get('Content-MD5')
 
@@ -77,17 +86,14 @@ class UploadHandler(tornado.web.RequestHandler):
         if computed_sha == received_sha:
             self.set_status(200)
             self.write("File received and verified successfully!")
-            add_to_buffer("Update File received")
             with open(os.path.expanduser("~/update/updtPckg.tar.gz"), 'wb') as file:
                 file.write(received_file)
-            add_to_buffer("File saved, starting update process")
             updating = True
             tr = threading.Thread(target=startUpdate)
             tr.start()
         else:
             self.set_status(400)
             self.write("sha checksum mismatch!")
-            add_to_buffer("File received erroneusly")
         
     def options(self):
         global stopESPcomm
@@ -97,31 +103,157 @@ class UploadHandler(tornado.web.RequestHandler):
         self.finish()
         stopESPcomm = True
 
-# GLOBAL VARIABLES
-autoupdate_path = "./meticulous-raspberry-setup/meticulous-autoupdate"
-user_path=os.path.expanduser("~/")
 
-updating = False
 
+##################################################################################################################
+# IPC HANDLERS
+IPC_path = f'{user_path}/ipc'                              # directory for the InterProcess Communication pipes
 pipe1 = None
 pipe2 = None
-
-pipe1_path = f''
-pipe2_path = f''
-
-message = bytes()
-backAlive = False
-continueUpdate = False
-
-backend_time_off = 5   #seconds the backend is allowed to be offline in one occurrence
-
-
-# THREAD VARIABLES
+pipe2_path = f'{IPC_path}/pipe2'
+pipe1_path = f'{IPC_path}/pipe1'
+IPC_message = bytes()
+backend_time_off = 2   #seconds the backend is allowed to be offline in one occurrence
 read_back_thread = None
 
-# FUNCTION DEFINITIONS
+#this function creates the pipes to allow communication between backend and the watcher
+def checkPipes():
+    #validates if the pipes directory exists
+    if os.path.exists(IPC_path):
+
+        #validates the file repersenting pipe1 exists
+        if os.path.exists(pipe1_path):
+
+            #checks if it is indeed a pipe
+            pipe1_stat = os.stat(pipe1_path)
+
+            #if its not a pipe, it deletes the file and creates a pipe
+            if not stat.S_ISFIFO(pipe1_stat.st_mode):
+                os.remove(pipe1_path)
+                os.mkfifo(pipe1_path)
+        #if the file representing a pipe does not exist
+        else:
+            #it's created
+            os.mkfifo()
+
+        #repeats with pipe 2
+        if os.path.exists(pipe2_path):
+
+            pipe2_stat = os.stat(pipe2_path)
+            
+            if not stat.S_ISFIFO(pipe2_stat.st_mode):
+                os.remove(pipe2_path)
+                os.mkfifo(pipe2_path)
+        else:
+            os.mkfifo()
+
+    #if not even the directory exists
+    else:
+        #create the base directory
+        os.mkdir(IPC_path)
+        #create the pipes
+        os.mkfifo(pipe1_path)
+        os.mkfifo(pipe2_path)
 
 
+##### BACKEND CHECKER
+
+backend_checker_thread = None
+backAlive = False
+backend_dead = False
+sio = None
+message_sent = False
+# This function kepps track that the backend is still alive or not and
+# updates the flag accordignly. It contains no logic to handle any case
+def readBackend():
+    global IPC_message
+    global backAlive
+    global continueUpdate
+    global pipe2
+
+    try:
+        pipe2 = os.open(pipe2_path, os.O_RDONLY | os.O_NONBLOCK)
+    except OSError as e:
+        print(f'an error occurred oppening pipe2: {e}')
+        pipe2 = None
+
+    while True:
+        time.sleep(1)
+        if pipe2 != None:
+            try:
+                IPC_message = os.read(pipe2, 1024)
+            except OSError as e:
+                print(f'error reading pipe2: {e}')
+            if IPC_message:
+                print(f'message received from backend: {IPC_message.decode()}')
+                backAlive = True
+                if len(IPC_message) > 3:
+                    if IPC_message.decode() == "released":
+                        continueUpdate = True
+
+#This functions checks if the backend has been offline more than it should
+def backendFail():
+    global updating
+    global backAlive
+
+    _backAlive = backAlive
+    backAlive = False
+    print(f'backend is alive: {_backAlive}')
+    return (not _backAlive) and (not updating)
+
+# This function checks if the failure was not isolated (this must be a task in a thread)
+def backendDead():
+    global backend_dead
+    failure_count = 0
+
+    while True:
+        time.sleep(backend_time_off)
+        print("backend checker tick")
+        if backendFail():
+            print("backend not responding")
+            failure_count = failure_count + 1
+        else:
+            failure_count = 0
+
+        if failure_count > 4:
+            failure_count = 0
+
+            #stop the back as we will need the por 8080 to be free, just making sure of it
+            subprocess.run("systemctl stop back",shell=True,capture_output=True,text=True,cwd=user_path)
+
+            # sets the flag to indificate the backend is dead
+            backend_dead = True
+
+            #Notify the user to restart the Meticulous or upload software
+            #START LIL BACKEND
+            #NOTIFY USER TO RESTART OR UPLOAD
+    
+async def eventEmitter():
+    global sio
+    global update_finished
+    global message_sent
+    event_refresh_period = 2 #emit the notification every 2 seconds
+
+    while True:
+        if(backend_dead and not message_sent):
+            message_sent = True
+            await sio.emit('message', 'Something has happened, please reboot your Meticulous or update the software. If the problem persist, please contact us')
+        if(update_finished):
+            update_finished = False
+            await sio.emit('message','The update has finished. Happy brewing!')
+        await sio.sleep(event_refresh_period)
+
+
+
+##################################################################################################################
+# UPDATE HANDLERS
+autoupdate_path = "./update/meticulous/UpdateScript" 
+updating = False
+continueUpdate = False
+app = None
+update_finished = False
+
+#This function creates the update directory where the file will be stored and extracted
 def createUpdateDir():
     # Specify the directory path you want to create
     directory_path = os.path.expanduser("~/update")
@@ -132,66 +264,14 @@ def createUpdateDir():
         os.makedirs(directory_path)
         #print(f"Directory '{directory_path}' created successfully.")
 
-#this function opens a pipe to allow communication between backend and the watcher
-def openPipes():
-    try:
-        pipe2 = os.open(pipe2_path, os.O_RDONLY | os.O_NONBLOCK)
-        pipe1 = os.open(pipe1_path, os.O_WRONLY)
-    except OSError as e:
-        print(f'an error occurred oppening pipes: {e}')
-
-# This function kepps track that the backend is still alive or not and
-# updates the flag accordignly. It contains no logic to handle any case
-def readBackend():
-    global message
-    global backAlive
-    global continueUpdate
-    global first_backend_fail_time
-
-    while True:
-        if pipe1 != None:
-            message = os.read(pipe1, 1024)
-            if message:
-                backAlive = True
-                if len(message) > 3:
-                    continueUpdate = message.decode() == "released"
-            else:
-                backAlive = False
-
-
-#This functions checks if the backend has been offline more than it should
-def backendFail():
-    global updating
-    if backAlive:
-        return False
-    else:
-        time.sleep(backend_time_off)
-        return (not backAlive) and (not updating)
-
-# This function checks if the failure was not isolated
-def backendDead():
-    failure_count = 0
-    while True:
-        if backendFail():
-            failure_count = failure_count + 1
-        else:
-            failure_count = 0
-
-        if failure_count > 4:
-            #Se make sure the backend procecss is dead
-            subprocess.run("systemctl stop back.service ",shell=True,capture_output=True,text=True,cwd=user_path)
-            #Notify the user to restart the Meticulous or upload software
-            #START LIL BACKEND
-            #NOTIFY USER TO RESTART OR UPLOAD
-
+#This function starts the update process
 def startUpdate():
 
-    global stopESPcomm
-    global reboot_flag
+    global update_finished
     global continueUpdate
     global updating
 
-    stopESPcomm = True
+    updating = True  # affects: 
 
     path = "./update/updtPckg.tar.gz"
 
@@ -203,45 +283,58 @@ def startUpdate():
     command = f'sudo rm {path}'
     subprocess.run(command, shell=True,cwd=user_path)
 
-    # ASK BACKEND TO FREE RESOURCES
+    # KILL BACKEND
+    subprocess.run("systemctl stop back",shell=True)
 
-    # WAIT FOR THE BACKEND CONFIRMATION THAT RESOURCES ARE FREED (and its dead)
+    #call the update script that will be provided in the update pckg
+    command = f'python3 {autoupdate_path}/update_protocol.py'
 
-    #call the update script (will use the script as a module)
-    command = f'python {autoupdate_path}/update_protocol.py'
+    print("actualizando")
     update_success = subprocess.run(command, shell=True, capture_output=True, text=True,cwd=user_path).stdout
 
     print(update_success)
 
-    reboot_flag = True
-    time.sleep(2)
-    PID = subprocess.run("systemctl status back.service | grep -oP 'Main PID: \K\d+'",shell=True,capture_output=True,text=True,cwd=user_path).stdout
-
-    #y lo matamos alv _(~o _ o~)_/\_(0 _ 0)_
-
-    subprocess.run(f'sudo kill -9 {PID}',shell=True,cwd=user_path)
+    #We restart the backend
+    subprocess.run("systemctl stop back",shell=True,capture_output=True,text=True,cwd=user_path)
+    time.sleep(1)
+    subprocess.run("systemctl start back",shell=True,capture_output=True,text=True,cwd=user_path)
+    time.sleep(3)
+    message_sent = False
     updating = False
+    continueUpdate = False
+    update_finished = True
 
 def main():
     global read_back_thread
+    global app
+    global sio
 
     parse_command_line()
 
     #opens the pipes to chat with backend
-    openPipes()
+    checkPipes()
 
     #starts the thread that reads the pipe2
     read_back_thread = threading.Thread(target=readBackend)
     read_back_thread.start()
 
+    #starts the thread that checks if the backend is live
+    backend_checker_thread = threading.Thread(target=backendDead)
+    backend_checker_thread.start()
+
+    sio = socketio.AsyncServer(cors_allowed_origins='*', async_mode='tornado')
+
 
     app = tornado.web.Application(
         [
             (r"/update", UploadHandler),
+            (r"/socket.io/", socketio.get_tornado_handler(sio)),
         ],
     )
 
     app.listen(options.port)
+
+    sio.start_background_task(eventEmitter)
     tornado.ioloop.IOLoop.current().start()
 
 
