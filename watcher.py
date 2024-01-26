@@ -1,52 +1,5 @@
 # meticulous watcher script for the service
-# this Script will handle the following tasks
-#
-# Update the firmware
-# Check if the  backend is live
-#
-# HOW
-#
-# an implementation of Pipes will be done to communicate
-# backend process and watcher process
-# 
-# there will be:
-#
-# pipe1: Watcher >=====> backend
-#
-# pipe2: Watcher <=====< backend
-#
-# The watcher will be listening to pipe2 to see if the 
-# backend is live and update a flag accordingly
-#
-# if the backend is not live for more than a certain
-# ammount of time, X attempts to start the service will be done
-# if after that still dead. The following will happen:
-# 
-# 1. a minor version of backend that will only be able
-#    to communicate with the frontend will "spawn" and
-#    send a message to reboot the machine and if the 
-#    problem persist to update the software
-# 
-# To update the firmware:
-#
-# 1. It will receive and validate the data sent by the 
-#    dashboard.
-# 2. After data validation ~/update directory is created
-#    to store the file
-# 3. The file is decompressed and extracted
-# 4. It will make use of the pipe1 to ask the backend to 
-#    release GPIO pins and cut comms with arduino (or to
-#    just kill itself after freeing its resoources). Will
-#    ask for a response after freeing the resources in order
-#    to continue (for the case the backend kills itself,
-#    a flag will be set to override the "failure state" of
-#    the backend)
-# 5. After confirmation of resources freed, it will call the
-#    update_protocol script to update the firmware
-# 6. a minor version of backend that will only be able
-#    to communicate with the frontend will "spawn" and
-#    send a message to reboot the machine when the update is done
-
+# this Script will handle emergency updates for the backend
 
 from tornado.options import define, options, parse_command_line
 import tornado.web
@@ -54,295 +7,109 @@ import tornado.ioloop
 import hashlib
 import os
 import subprocess
-import time
 import threading
 import traceback
-import stat
 import socketio
-import asyncio
+import zipfile
+import shutil
 
-user_path=os.path.expanduser("~/")
+WORK_DIR="/opt"
+TMP_DIR="/tmp"
+UPDATE_FILE = os.path.join(TMP_DIR, "meticulous-backend-update.zip")
+BACKEND_FOLDER = "meticulous-backend"
 
-##################################################################################################################
-##################################################################################################################
-##################################################################################################################
-##################################################################################################################
-##################################################################################################################
 # HTTP SERVER HANDLING
 class UploadHandler(tornado.web.RequestHandler):
     def set_default_headers(self):
-        self.set_header("Access-Control-Allow-Origin", "http://192.168.50.10:3000")     #allows requests from the dashboard
+        self.set_header("Access-Control-Allow-Origin", "*")     #allows requests from the dashboard
         self.set_header("Access-Control-Allow-Headers", "x-requested-with, Content-MD5, Content-Length")
-        self.set_header('Access-Control-Allow-Methods', 'OPTIONS, PUT')
+        self.set_header('Access-Control-Allow-Methods', 'POST')
 
-    def put(self):
-        global updating
-        global message_sent
-        received_file = self.request.body
-        received_sha = self.request.headers.get('Content-MD5')
-
-        computed_sha = hashlib.sha256(received_file).hexdigest()
-
-        if computed_sha == received_sha:
-            self.set_status(200)
-            self.write("File received and verified successfully!")
-            with open(os.path.expanduser("~/update/updtPckg.tar.gz"), 'wb') as file:
-                file.write(received_file)
-            updating = True
-            tr = threading.Thread(target=startUpdate)
-            tr.start()
-        else:
+    def post(self):
+        if 'file' not in self.request.files:
             self.set_status(400)
-            self.write("sha checksum mismatch!")
-        
-    def options(self):
-        global stopESPcomm
-        # no body
-        createUpdateDir()
-        self.set_status(204)
-        self.finish()
-        stopESPcomm = True
+            self.finish("No file uploaded.")
+            return
+        self.set_status(200)
+        self.write("File received!")
+        uploaded_file = self.request.files['file'][0]['body']
+        with open(os.path.expanduser(UPDATE_FILE), 'wb') as file:
+            file.write(uploaded_file)
 
+        self.startUpdate()
 
+    def startUpdate(self):
 
-##################################################################################################################
-# IPC HANDLERS
-IPC_path = f'{user_path}/ipc'                              # directory for the InterProcess Communication pipes
-pipe1 = None
-pipe2 = None
-pipe2_path = f'{IPC_path}/pipe2'
-pipe1_path = f'{IPC_path}/pipe1'
-IPC_message = bytes()
-backend_time_off = 2   #seconds the backend is allowed to be offline in one occurrence
-read_back_thread = None
+        subprocess.run("systemctl stop meticulous-backend", shell=True)
 
-#this function creates the pipes to allow communication between backend and the watcher
-def checkPipes():
-    #validates if the pipes directory exists
-    if os.path.exists(IPC_path):
+        #extract the directory of the update 
+        success = self.unzip_update(UPDATE_FILE, TMP_DIR)
 
-        #validates the file repersenting pipe1 exists
-        if os.path.exists(pipe1_path):
-
-            #checks if it is indeed a pipe
-            pipe1_stat = os.stat(pipe1_path)
-
-            #if its not a pipe, it deletes the file and creates a pipe
-            if not stat.S_ISFIFO(pipe1_stat.st_mode):
-                os.remove(pipe1_path)
-                os.mkfifo(pipe1_path)
-        #if the file representing a pipe does not exist
-        else:
-            #it's created
-            os.mkfifo()
-
-        #repeats with pipe 2
-        if os.path.exists(pipe2_path):
-
-            pipe2_stat = os.stat(pipe2_path)
-            
-            if not stat.S_ISFIFO(pipe2_stat.st_mode):
-                os.remove(pipe2_path)
-                os.mkfifo(pipe2_path)
-        else:
-            os.mkfifo()
-
-    #if not even the directory exists
-    else:
-        #create the base directory
-        os.mkdir(IPC_path)
-        #create the pipes
-        os.mkfifo(pipe1_path)
-        os.mkfifo(pipe2_path)
-
-
-##### BACKEND CHECKER
-
-backend_checker_thread = None
-backAlive = False
-backend_dead = False
-sio = None
-message_sent = False
-# This function kepps track that the backend is still alive or not and
-# updates the flag accordignly. It contains no logic to handle any case
-def readBackend():
-    global IPC_message
-    global backAlive
-    global continueUpdate
-    global pipe2
-
-    try:
-        pipe2 = os.open(pipe2_path, os.O_RDONLY | os.O_NONBLOCK)
-    except OSError as e:
-        print(f'an error occurred oppening pipe2: {e}')
-        pipe2 = None
-
-    while True:
-        time.sleep(1)
-        if pipe2 != None:
+        os.remove(UPDATE_FILE)
+        if success:
+            print("Update succeeded, replacing backend")
             try:
-                IPC_message = os.read(pipe2, 1024)
-            except OSError as e:
-                print(f'error reading pipe2: {e}')
-            if IPC_message:
-                print(f'message received from backend: {IPC_message.decode()}')
-                backAlive = True
-                if len(IPC_message) > 3:
-                    if IPC_message.decode() == "released":
-                        continueUpdate = True
+                shutil.rmtree(os.path.join(WORK_DIR, BACKEND_FOLDER))
+            except FileNotFoundError:
+                self.write("Existing backend folder not found. Please check your path configs")
+                print("Existing backend folder not found. Please check your path configs")
+            shutil.move(os.path.join(TMP_DIR, BACKEND_FOLDER), os.path.join(WORK_DIR, BACKEND_FOLDER))
 
-#This functions checks if the backend has been offline more than it should
-def backendFail():
-    global updating
-    global backAlive
-
-    _backAlive = backAlive
-    backAlive = False
-    print(f'backend is alive: {_backAlive}')
-    return (not _backAlive) and (not updating)
-
-# This function checks if the failure was not isolated (this must be a task in a thread)
-def backendDead():
-    global backend_dead
-    failure_count = 0
-
-    while True:
-        time.sleep(backend_time_off)
-        print("backend checker tick")
-        if backendFail():
-            print("backend not responding")
-            failure_count = failure_count + 1
-        else:
-            failure_count = 0
-
-        if failure_count > 4:
-            failure_count = 0
-
-            #stop the back as we will need the por 8080 to be free, just making sure of it
-            subprocess.run("systemctl stop back",shell=True,capture_output=True,text=True,cwd=user_path)
-
-            # sets the flag to indificate the backend is dead
-            backend_dead = True
-
-            #Notify the user to restart the Meticulous or upload software
-            #START LIL BACKEND
-            #NOTIFY USER TO RESTART OR UPLOAD
-    
-async def eventEmitter():
-    global sio
-    global update_finished
-    global message_sent
-    event_refresh_period = 2 #emit the notification every 2 seconds
-
-    while True:
-        if(backend_dead and not message_sent):
-            message_sent = True
-            await sio.emit('message', 'Something has happened, please reboot your Meticulous or update the software. If the problem persist, please contact us')
-        if(update_finished):
-            update_finished = False
-            await sio.emit('message','The update has finished. Happy brewing!')
-        await sio.sleep(event_refresh_period)
+        # restart
+        subprocess.run("systemctl start meticulous-backend", shell=True)
+        print("Backend restarted")
 
 
+    def unzip_update(self, zip_path, output_folder):
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            # List of file paths in the zip, excluding those in the ignore_folder
+            file_paths = zip_ref.namelist()
+            for file in file_paths:
+                if not file.startswith(BACKEND_FOLDER):
+                    self.set_status(400)
+                    self.finish("file contains wrong update folder")
+                    return False
+                if ".." in file:
+                    self.set_status(400)
+                    self.finish("file contains traversel path")
+                    return False
 
-##################################################################################################################
-# UPDATE HANDLERS
-autoupdate_path = "./update/meticulous/UpdateScript" 
-updating = False
-continueUpdate = False
-app = None
-update_finished = False
+            # Iterate over the file list and extract each file
+            for file in file_paths:
+                # Extract the file to the specified directory
+                zip_ref.extract(file, output_folder)
+                print(file)
+            return True
+        return False
 
-#This function creates the update directory where the file will be stored and extracted
-def createUpdateDir():
-    # Specify the directory path you want to create
-    directory_path = os.path.expanduser("~/update")
-
-    # Check if the directory already exists
-    if not os.path.exists(directory_path):
-    # Create the directory if it does not exist
-        os.makedirs(directory_path)
-        #print(f"Directory '{directory_path}' created successfully.")
-
-#This function starts the update process
-def startUpdate():
-
-    global update_finished
-    global continueUpdate
-    global updating
-
-    updating = True  # affects: 
-
-    path = "./update/updtPckg.tar.gz"
-
-    #extract the directory of the update 
-    command = f'sudo tar -xzf {path} -C ./update'
-    subprocess.run(command, shell=True,cwd=user_path)
-
-    #delete the compressed file
-    command = f'sudo rm {path}'
-    subprocess.run(command, shell=True,cwd=user_path)
-
-    # KILL BACKEND
-    subprocess.run("systemctl stop back",shell=True)
-
-    #call the update script that will be provided in the update pckg
-    command = f'python3 {autoupdate_path}/update_protocol.py'
-
-    print("actualizando")
-    update_success = subprocess.run(command, shell=True, capture_output=True, text=True,cwd=user_path).stdout
-
-    print(update_success)
-
-    #We restart the backend
-    subprocess.run("systemctl stop back",shell=True,capture_output=True,text=True,cwd=user_path)
-    time.sleep(1)
-    subprocess.run("systemctl start back",shell=True,capture_output=True,text=True,cwd=user_path)
-    time.sleep(3)
-    message_sent = False
-    updating = False
-    continueUpdate = False
-    update_finished = True
 
 def main():
-    global read_back_thread
-    global app
-    global sio
 
     parse_command_line()
 
-    #opens the pipes to chat with backend
-    checkPipes()
-
-    #starts the thread that reads the pipe2
-    read_back_thread = threading.Thread(target=readBackend)
-    read_back_thread.start()
-
-    #starts the thread that checks if the backend is live
-    backend_checker_thread = threading.Thread(target=backendDead)
-    backend_checker_thread.start()
-
     sio = socketio.AsyncServer(cors_allowed_origins='*', async_mode='tornado')
-
 
     app = tornado.web.Application(
         [
             (r"/update", UploadHandler),
             (r"/socket.io/", socketio.get_tornado_handler(sio)),
+            (r'/(.*)', tornado.web.StaticFileHandler, {"default_filename": "index.html","path": os.path.dirname(__file__)+"/meticulous-dashboard"}),
+            (r'', tornado.web.RedirectHandler, {"url":"/"}),
         ],
     )
 
     app.listen(options.port)
-
-    sio.start_background_task(eventEmitter)
+    print(f"Listening on port {options.port}")
     tornado.ioloop.IOLoop.current().start()
 
 
 #execution phase
-define("port", default=8081, help="run on the given port", type=int)
+define("port", default=3000, help="run on the given port", type=int)
 
 if __name__ == "__main__":
     try:
         main()
+    except KeyboardInterrupt:
+        pass
     except:
         traceback.print_exc()
