@@ -93,7 +93,7 @@ def main():
         [
             (r"/update", UploadHandler),
             (r"/socket.io/", socketio.get_tornado_handler(sio)),
-            (r'/(.*)', tornado.web.StaticFileHandler, {"default_filename": "index.html","path": os.path.dirname(__file__)+"/meticulous-dashboard"}),
+            (r'/(.*)', tornado.web.StaticFileHandler, {"default_filename": "index.html","path": os.path.join(WORK_DIR, "meticulous-dashboard")}),
             (r'', tornado.web.RedirectHandler, {"url":"/"}),
         ],
     )
