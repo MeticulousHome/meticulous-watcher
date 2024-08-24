@@ -4,36 +4,42 @@
 from tornado.options import define, options, parse_command_line
 import tornado.web
 import tornado.ioloop
-import hashlib
 import os
 import subprocess
-import threading
 import traceback
-import socketio
 import zipfile
 import shutil
+from systemd import journal
 
-WORK_DIR="/opt"
-TMP_DIR="/tmp"
+from math import floor, log
+
+WORK_DIR = "/opt"
+TMP_DIR = "/tmp"
 UPDATE_FILE = os.path.join(TMP_DIR, "meticulous-backend-update.zip")
 BACKEND_FOLDER = "meticulous-backend"
+
 
 # HTTP SERVER HANDLING
 class UploadHandler(tornado.web.RequestHandler):
     def set_default_headers(self):
-        self.set_header("Access-Control-Allow-Origin", "*")     #allows requests from the dashboard
-        self.set_header("Access-Control-Allow-Headers", "x-requested-with, Content-MD5, Content-Length")
-        self.set_header('Access-Control-Allow-Methods', 'POST')
+        self.set_header(
+            "Access-Control-Allow-Origin", "*"
+        )  # allows requests from the dashboard
+        self.set_header(
+            "Access-Control-Allow-Headers",
+            "x-requested-with, Content-MD5, Content-Length",
+        )
+        self.set_header("Access-Control-Allow-Methods", "POST")
 
     def post(self):
-        if 'file' not in self.request.files:
+        if "file" not in self.request.files:
             self.set_status(400)
             self.finish("No file uploaded.")
             return
         self.set_status(200)
         self.write("File received!")
-        uploaded_file = self.request.files['file'][0]['body']
-        with open(os.path.expanduser(UPDATE_FILE), 'wb') as file:
+        uploaded_file = self.request.files["file"][0]["body"]
+        with open(os.path.expanduser(UPDATE_FILE), "wb") as file:
             file.write(uploaded_file)
 
         self.startUpdate()
@@ -42,7 +48,7 @@ class UploadHandler(tornado.web.RequestHandler):
 
         subprocess.run("systemctl stop meticulous-backend", shell=True)
 
-        #extract the directory of the update 
+        # extract the directory of the update
         success = self.unzip_update(UPDATE_FILE, TMP_DIR)
 
         os.remove(UPDATE_FILE)
@@ -51,17 +57,23 @@ class UploadHandler(tornado.web.RequestHandler):
             try:
                 shutil.rmtree(os.path.join(WORK_DIR, BACKEND_FOLDER))
             except FileNotFoundError:
-                self.write("Existing backend folder not found. Please check your path configs")
-                print("Existing backend folder not found. Please check your path configs")
-            shutil.move(os.path.join(TMP_DIR, BACKEND_FOLDER), os.path.join(WORK_DIR, BACKEND_FOLDER))
+                self.write(
+                    "Existing backend folder not found. Please check your path configs"
+                )
+                print(
+                    "Existing backend folder not found. Please check your path configs"
+                )
+            shutil.move(
+                os.path.join(TMP_DIR, BACKEND_FOLDER),
+                os.path.join(WORK_DIR, BACKEND_FOLDER),
+            )
 
         # restart
         subprocess.run("systemctl start meticulous-backend", shell=True)
         print("Backend restarted")
 
-
     def unzip_update(self, zip_path, output_folder):
-        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
             # List of file paths in the zip, excluding those in the ignore_folder
             file_paths = zip_ref.namelist()
             for file in file_paths:
@@ -83,18 +95,126 @@ class UploadHandler(tornado.web.RequestHandler):
         return False
 
 
+class LogsHandler(tornado.web.RequestHandler):
+    def get(self):
+        try:
+            self.set_header("Content-Type", "text/plain")
+            j = journal.Reader()
+            j.this_boot()
+            j.log_level(journal.LOG_INFO)
+
+            filter_param = self.get_argument(
+                "filter", default="meticulous-backend.service"
+            )
+            if filter_param != "*":
+                if not filter_param.endswith(".service"):
+                    filter_param += ".service"
+                j.add_match(_SYSTEMD_UNIT=filter_param)
+
+            for entry in j:
+                time = entry.get("__REALTIME_TIMESTAMP", "Unknown Timestamp")
+                unit = entry.get("_SYSTEMD_UNIT", "")
+                if unit != "":
+                    unit = " : " + unit
+                transport = entry.get("_TRANSPORT", "")
+                message = entry.get("MESSAGE", "")
+                self.write(f"{time} : {transport.ljust(7)}{unit} - {message}\n")
+            self.finish()
+        except Exception as e:
+            self.set_status(500)
+            self.write(f"Log fetching error: {e}")
+
+
+def checkServiceRunning(service):
+    try:
+        """Return True if service is running"""
+        if not service.endswith(".service"):
+            service += ".service"
+        cmd = f"/bin/systemctl status {service}"
+        proc = subprocess.Popen(
+            cmd,
+            shell=True,
+            stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            encoding="utf8",
+        )
+        output = proc.communicate()[0]
+        if output == "":
+            output = proc.communicate()[1]
+        stdout_list = output.split("\n")
+        for line in stdout_list:
+            if "Active:" in line.strip():
+                if "(running)" in line:
+                    return {"status": "running"}
+                else:
+                    break
+        return {"status": "error", "message": output}
+
+    except Exception as e:
+        print(f"Error checking if service is running: {e}")
+        return {"status": "unknown", "exception": e}
+
+
+def format_bytes(size):
+    power = 0 if size <= 0 else floor(log(size, 1024))
+    return (
+        f"{round(size / 1024 ** power, 2)} {['B', 'KB', 'MB', 'GB', 'TB'][int(power)]}"
+    )
+
+
+def getDiskUsage(path="/"):
+    try:
+        total, used, free = shutil.disk_usage(path=path)
+        return {
+            "total": format_bytes(total),
+            "used": format_bytes(used),
+            "free": format_bytes(free),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+class StatusHandler(tornado.web.RequestHandler):
+    def get(self):
+        self.set_header("Content-Type", "application/json")
+        systemStatus = {
+            "discUsage": {
+                "/": getDiskUsage("/"),
+                "/boot/env": getDiskUsage("/boot/env"),
+                "/metciulous-user": getDiskUsage("/meticulous-user"),
+            },
+            "services": {
+                "backend": checkServiceRunning("meticulous-backend"),
+                "dial": checkServiceRunning("meticulous-dial"),
+                "rauc": checkServiceRunning("rauc"),
+                "meticulous-rauc": checkServiceRunning("meticulous-rauc"),
+                "rauc-hawkbit-updater": checkServiceRunning("rauc-hawkbit-updater"),
+                "nginx": checkServiceRunning("nginx"),
+                "systemd-journald": checkServiceRunning("systemd-journald"),
+            },
+        }
+
+        systemStatus["status"] = (
+            "ok"
+            if all(
+                status.get("status") == "running"
+                for status in systemStatus.get("services").values()
+            )
+            else "error"
+        )
+        self.write(systemStatus)
+        self.finish()
+
+
 def main():
-
     parse_command_line()
-
-    sio = socketio.AsyncServer(cors_allowed_origins='*', async_mode='tornado')
 
     app = tornado.web.Application(
         [
             (r"/update", UploadHandler),
-            (r"/socket.io/", socketio.get_tornado_handler(sio)),
-            (r'/(.*)', tornado.web.StaticFileHandler, {"default_filename": "index.html","path": os.path.join(WORK_DIR, "meticulous-dashboard")}),
-            (r'', tornado.web.RedirectHandler, {"url":"/"}),
+            (r"/logs", LogsHandler),
+            (r"/status", StatusHandler),
+            (r"", tornado.web.RedirectHandler, {"url": "/"}),
         ],
     )
 
@@ -103,7 +223,7 @@ def main():
     tornado.ioloop.IOLoop.current().start()
 
 
-#execution phase
+# execution phase
 define("port", default=3000, help="run on the given port", type=int)
 
 if __name__ == "__main__":
@@ -111,5 +231,5 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         pass
-    except:
+    except Exception:
         traceback.print_exc()
