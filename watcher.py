@@ -195,6 +195,19 @@ def getUptime():
         return str(e)
 
 
+def getMemoryUsage():
+    try:
+        mem = psutil.virtual_memory()
+        return {
+            "total": format_bytes(mem.total),
+            "used": format_bytes(mem.used),
+            "free": format_bytes(mem.free),
+            "shared": format_bytes(mem.shared),
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 class StatusHandler(tornado.web.RequestHandler):
     def get(self):
         self.set_header("Content-Type", "application/json")
@@ -214,6 +227,7 @@ class StatusHandler(tornado.web.RequestHandler):
                 "systemd-journald": checkServiceRunning("systemd-journald"),
             },
             "uptime": getUptime(),
+            "memoryUsage": getMemoryUsage(),
         }
 
         systemStatus["status"] = (
