@@ -10,6 +10,9 @@ import traceback
 import zipfile
 import shutil
 from systemd import journal
+import psutil
+import time
+
 
 from math import floor, log
 
@@ -174,6 +177,24 @@ def getDiskUsage(path="/"):
         return {"error": str(e)}
 
 
+def getUptime():
+    try:
+        seconds = int(time.time() - psutil.boot_time())
+        minutes = seconds // 60
+        hours = minutes // 60
+
+        days = hours // 24
+
+        hours %= 24
+        minutes %= 60
+        seconds %= 60
+        uptime = f"{days} days, {hours} hours {minutes} minutes {seconds} seconds"
+
+        return uptime
+    except Exception as e:
+        return str(e)
+
+
 class StatusHandler(tornado.web.RequestHandler):
     def get(self):
         self.set_header("Content-Type", "application/json")
@@ -192,6 +213,7 @@ class StatusHandler(tornado.web.RequestHandler):
                 "nginx": checkServiceRunning("nginx"),
                 "systemd-journald": checkServiceRunning("systemd-journald"),
             },
+            "uptime": getUptime(),
         }
 
         systemStatus["status"] = (
