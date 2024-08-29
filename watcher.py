@@ -177,6 +177,23 @@ def getDiskUsage(path="/"):
         return {"error": str(e)}
 
 
+def getDiskUsages():
+    discUsage = []
+    try:
+        discs = psutil.disk_partitions()
+        discUsage = [
+            {
+                "mountpoint": disc.mountpoint,
+                "device": disc.device,
+                "usage": getDiskUsage(disc.mountpoint),
+            }
+            for disc in discs
+        ]
+    except Exception:
+        pass
+    return discUsage
+
+
 def getUptime():
     try:
         seconds = int(time.time() - psutil.boot_time())
@@ -211,12 +228,8 @@ def getMemoryUsage():
 class StatusHandler(tornado.web.RequestHandler):
     def get(self):
         self.set_header("Content-Type", "application/json")
+
         systemStatus = {
-            "discUsage": {
-                "/": getDiskUsage("/"),
-                "/boot/env": getDiskUsage("/boot/env"),
-                "/metciulous-user": getDiskUsage("/meticulous-user"),
-            },
             "services": {
                 "backend": checkServiceRunning("meticulous-backend"),
                 "dial": checkServiceRunning("meticulous-dial"),
@@ -228,6 +241,7 @@ class StatusHandler(tornado.web.RequestHandler):
             },
             "uptime": getUptime(),
             "memoryUsage": getMemoryUsage(),
+            "discs": getDiskUsages(),
         }
 
         systemStatus["status"] = (
