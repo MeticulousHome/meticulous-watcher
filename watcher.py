@@ -103,12 +103,15 @@ class LogsHandler(tornado.web.RequestHandler):
         try:
             self.set_header("Content-Type", "text/plain")
             j = journal.Reader()
-            j.this_boot()
             j.log_level(journal.LOG_INFO)
 
             filter_param = self.get_argument(
                 "filter", default="meticulous-backend.service"
             )
+            everyBoot = self.get_argument("everyBoot", default=None)
+            if everyBoot is None:
+                j.this_boot()
+
             if filter_param != "*":
                 if not filter_param.endswith(".service"):
                     filter_param += ".service"
