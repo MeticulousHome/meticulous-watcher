@@ -12,7 +12,7 @@ import shutil
 from systemd import journal
 import psutil
 import time
-
+import sdnotify 
 
 from math import floor, log
 
@@ -260,21 +260,36 @@ class StatusHandler(tornado.web.RequestHandler):
 
 
 def main():
-    parse_command_line()
+    try:
+        notifier = sdnotify.SystemdNotifier()
+        
+        # Notify that it is starting
+        notifier.notify("STATUS=Initializing meticulous watcher...")
+        
+        parse_command_line()
 
-    app = tornado.web.Application(
-        [
-            (r"/update", UploadHandler),
-            (r"/logs", LogsHandler),
-            (r"/status", StatusHandler),
-            (r"", tornado.web.RedirectHandler, {"url": "/"}),
-        ],
-    )
+        app = tornado.web.Application(
+            [
+                (r"/update", UploadHandler),
+                (r"/logs", LogsHandler),
+                (r"/status", StatusHandler),
+                (r"", tornado.web.RedirectHandler, {"url": "/"}),
+            ],
+        )
 
-    app.listen(options.port)
-    print(f"Listening on port {options.port}")
-    tornado.ioloop.IOLoop.current().start()
+        app.listen(options.port)
+        
+        # Notify that it is ready
+        notifier.notify("READY=1")
+        notifier.notify(f"STATUS=Meticulous watcher running on port {options.port}")
+        
+        print(f"Listening on port {options.port}")
+        tornado.ioloop.IOLoop.current().start()
 
+    except Exception as e:
+        if 'notifier' in locals():
+            notifier.notify(f"STATUS=Watcher initialization failed: {str(e)}")
+        raise
 
 # execution phase
 define("port", default=3000, help="run on the given port", type=int)
