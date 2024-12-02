@@ -1,5 +1,6 @@
 tornado
 python-engineio==4.6.1
 python-socketio==5.8.0
+sdnotify==0.3.2
 systemd-python
 psutil
