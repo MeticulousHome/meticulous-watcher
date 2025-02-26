@@ -65,12 +65,17 @@ def checkServiceRunning(service):
         if output == "":
             output = proc.communicate()[1]
         stdout_list = output.split("\n")
+
+        exited = False
         for line in stdout_list:
             if "Active:" in line.strip():
                 if "(running)" in line:
                     return {"status": "running"}
-                else:
-                    break
+                elif "active (exited)" in line:
+                    exited = True
+            if "Process:" in line.strip() and exited:
+                if "status=0/SUCCESS" in line:
+                    return {"status": "exited"}
         return {"status": "error", "message": output}
 
     except Exception as e:
@@ -167,7 +172,7 @@ class StatusHandler(tornado.web.RequestHandler):
         systemStatus["status"] = (
             "ok"
             if all(
-                status.get("status") == "running"
+                status.get("status") != "error"
                 for status in systemStatus.get("services").values()
             )
             else "error"
@@ -194,18 +199,19 @@ def main():
         )
 
         app.listen(options.port)
-        
+
         # Notify that it is ready
         notifier.notify("READY=1")
         notifier.notify(f"STATUS=Meticulous watcher running on port {options.port}")
-        
+
         print(f"Listening on port {options.port}")
         tornado.ioloop.IOLoop.current().start()
 
     except Exception as e:
-        if 'notifier' in locals():
+        if "notifier" in locals():
             notifier.notify(f"STATUS=Watcher initialization failed: {str(e)}")
         raise
+
 
 # execution phase
 define("port", default=3000, help="run on the given port", type=int)
