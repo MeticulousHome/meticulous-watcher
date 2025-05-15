@@ -26,21 +26,38 @@ class LogsHandler(tornado.web.RequestHandler):
             filter_param = self.get_argument(
                 "filter", default="meticulous-backend.service"
             )
+
             hours = self.get_argument("hours", default="24")
+            since = self.get_argument("since", default=hours)
+            until = self.get_argument("until", default="0")
             try:
-                hours = int(hours)
+                since = int(since)
             except ValueError:
                 self.set_status(400)
-                self.write("Invalid hours parameter. Must be an integer.")
+                self.write("Invalid since or hours parameter. Must be an integer.")
                 return
+            try:
+                until = int(until)
+            except ValueError:
+                self.set_status(400)
+                self.write("Invalid until parameter. Must be an integer.")
+                return
+
             if filter_param != "*":
                 if not filter_param.endswith(".service"):
                     filter_param += ".service"
                 j.add_match(_SYSTEMD_UNIT=filter_param)
 
-            j.seek_realtime(datetime.now() - timedelta(hours=hours))
+            j.seek_realtime(datetime.now() - timedelta(hours=since))
+
+            if until != 0:
+                until = datetime.now() - timedelta(hours=until)
+            else
+                until = datetime.now()
 
             for entry in j:
+                if until != 0 and entry['__REALTIME_TIMESTAMP'] > until:
+                    break
                 time = entry.get("__REALTIME_TIMESTAMP", "Unknown Timestamp")
                 unit = entry.get("_SYSTEMD_UNIT", "")
                 if unit != "":
