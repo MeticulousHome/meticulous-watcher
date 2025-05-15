@@ -11,6 +11,7 @@ from systemd import journal
 import psutil
 import time
 import sdnotify
+from datetime import datetime, timedelta
 
 from math import floor, log
 
@@ -25,14 +26,19 @@ class LogsHandler(tornado.web.RequestHandler):
             filter_param = self.get_argument(
                 "filter", default="meticulous-backend.service"
             )
-            everyBoot = self.get_argument("everyBoot", default=None)
-            if everyBoot is None:
-                j.this_boot()
-
+            hours = self.get_argument("hours", default="24")
+            try:
+                hours = int(hours)
+            except ValueError:
+                self.set_status(400)
+                self.write("Invalid hours parameter. Must be an integer.")
+                return
             if filter_param != "*":
                 if not filter_param.endswith(".service"):
                     filter_param += ".service"
                 j.add_match(_SYSTEMD_UNIT=filter_param)
+
+            j.seek_realtime(datetime.now() - timedelta(hours=hours))
 
             for entry in j:
                 time = entry.get("__REALTIME_TIMESTAMP", "Unknown Timestamp")
