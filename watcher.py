@@ -51,12 +51,15 @@ class LogsHandler(tornado.web.RequestHandler):
             j.seek_realtime(datetime.now() - timedelta(hours=since))
 
             if until != 0:
-                until = datetime.now() - timedelta(hours=until)
-            else
-                until = datetime.now()
+                until_ts = datetime.now() - timedelta(hours=until)
+            else:
+                until_ts = datetime.now() - timedelta(hours=0)
 
             for entry in j:
-                if until != 0 and entry['__REALTIME_TIMESTAMP'] > until:
+                if (
+                    until != 0
+                    and entry["__REALTIME_TIMESTAMP"].timestamp() > until_ts.timestamp()
+                ):
                     break
                 time = entry.get("__REALTIME_TIMESTAMP", "Unknown Timestamp")
                 unit = entry.get("_SYSTEMD_UNIT", "")
