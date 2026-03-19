@@ -1,0 +1,53 @@
+# Stage 1: Build the venv with all compiled dependencies
+FROM debian:bookworm AS builder
+
+RUN apt-get update -y && apt-get dist-upgrade -y
+RUN apt-get install -y build-essential libsystemd-dev python3-dev pkg-config \
+    python3 \
+    python3-setuptools \
+    git curl
+
+# Install uv
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:$PATH"
+
+ENV UV_COMPILE_BYTECODE=1
+ENV UV_PROJECT_ENVIRONMENT=/opt/meticulous-watcher-venv
+
+WORKDIR /build
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# Stage 2: Assemble the .deb package
+FROM debian:bookworm AS packager
+
+RUN apt-get update -y && apt-get install -y --no-install-recommends dpkg-dev gettext-base
+
+ARG VERSION=0.1.0
+ARG ARCH=amd64
+
+WORKDIR /pkg
+
+# Copy static debian packaging skeleton and substitute version/arch
+COPY debian/ /pkg/
+RUN envsubst '${VERSION} ${ARCH}' < /pkg/DEBIAN/control > /pkg/DEBIAN/control.tmp \
+    && mv /pkg/DEBIAN/control.tmp /pkg/DEBIAN/control
+RUN chmod 755 /pkg/DEBIAN/postinst /pkg/usr/bin/meticulous-watcher
+
+# Create application directories
+RUN mkdir -p opt/meticulous-watcher-venv \
+    opt/meticulous-watcher
+
+# Copy the venv from builder
+COPY --from=builder /opt/meticulous-watcher-venv /pkg/opt/meticulous-watcher-venv
+
+# Copy application source
+COPY *.py /pkg/opt/meticulous-watcher/
+COPY pyproject.toml /pkg/opt/meticulous-watcher/
+
+# Build the .deb
+RUN mkdir -p /out && dpkg-deb --build /pkg /out/meticulous-watcher_${VERSION}_${ARCH}.deb
+
+# Final stage: just the .deb file for extraction
+FROM scratch
+COPY --from=packager /out/*.deb /

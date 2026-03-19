@@ -1,0 +1,2 @@
+#!/bin/bash
+exec /opt/meticulous-watcher-venv/bin/python3 /opt/meticulous-watcher/watcher.py "$@"

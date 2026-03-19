@@ -1,0 +1,11 @@
+Package: meticulous-watcher
+Version: ${VERSION}
+Architecture: ${ARCH}
+Maintainer: Meticulous Home <info@meticuloushome.com>
+Description: Meticulous Espresso Machine Watcher
+ Watcher service for the Meticulous espresso machine.
+ Provides system status, log collection and diagnostic archive endpoints.
+ Includes a pre-built Python virtual environment with all dependencies.
+Depends: python3, libsystemd0
+Section: misc
+Priority: optional
