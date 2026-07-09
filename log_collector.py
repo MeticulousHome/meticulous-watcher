@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import time as sys_time
 
 from systemd import journal
 
@@ -35,7 +36,11 @@ class LogCollector:
         start_time=None,
         end_time=None,
         cancelled=None,
-    ):
+        timeout=None,
+    ) -> tuple[list[dict], bool]:
+        bound_timeout = min(float(timeout), 999.0) if timeout is not None else None
+        if bound_timeout is not None and bound_timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
 
         try:
             j = journal.Reader()
@@ -66,14 +71,21 @@ class LogCollector:
             j.seek_realtime(start_ts)
             until_timestamp = until_ts.timestamp()
 
+            start_monotonic_time = sys_time.monotonic()
+            timed_out = False
+
             logs = []
             for entry_index, entry in enumerate(j):
-                if (
-                    cancelled is not None
-                    and entry_index % _CANCEL_CHECK_INTERVAL == 0
-                    and cancelled()
-                ):
-                    raise ClientGone()
+                if entry_index % _CANCEL_CHECK_INTERVAL == 0:
+                    if cancelled is not None and cancelled():
+                        raise ClientGone()
+                    if (
+                        bound_timeout is not None
+                        and sys_time.monotonic() - start_monotonic_time
+                        >= bound_timeout
+                    ):
+                        timed_out = True
+                        break
 
                 if entry["__REALTIME_TIMESTAMP"].timestamp() >= until_timestamp:
                     break
@@ -95,7 +107,7 @@ class LogCollector:
                     }
                 )
 
-            return logs
+            return logs, timed_out
 
         except ClientGone:
             raise

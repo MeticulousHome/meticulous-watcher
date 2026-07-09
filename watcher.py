@@ -91,6 +91,18 @@ class LogsHandler(CollectorHandler):
             if not filter_params:
                 filter_params = ["meticulous-backend.service"]
 
+            timeout_param = self.get_argument("timeout", default=None)
+            try:
+                timeout = int(timeout_param) if timeout_param is not None else None
+            except ValueError:
+                self.set_status(400)
+                self.write("Invalid timeout parameter. Must be an integer.")
+                return
+            if timeout is not None and timeout <= 0:
+                self.set_status(400)
+                self.write("Invalid timeout parameter. Must be greater than zero.")
+                return
+
             start_param = self.get_argument("start", default=None)
             end_param = self.get_argument("end", default=None)
 
@@ -148,14 +160,27 @@ class LogsHandler(CollectorHandler):
                 # Fetch and format in the same worker call: the entry list is
                 # the largest object in flight and there is no reason to hand
                 # it back to the IOLoop thread between the two steps.
-                return LogCollector.format_logs_as_text(
-                    LogCollector.fetch_logs(
-                        filter_params, cancelled=cancelled, **fetch_kwargs
-                    ),
+                logs, fetch_timed_out = LogCollector.fetch_logs(
+                    filter_params,
+                    cancelled=cancelled,
+                    timeout=timeout,
+                    **fetch_kwargs,
+                )
+                logs_text = LogCollector.format_logs_as_text(
+                    logs,
                     cancelled=cancelled,
                 )
+                return logs_text, fetch_timed_out
 
-            logs_text = await self.run_off_loop(collect, cancellable=True)
+            logs_text, fetch_timed_out = await self.run_off_loop(
+                collect, cancellable=True
+            )
+            if fetch_timed_out:
+                self.set_status(200)
+                self.write(
+                    "Warning: Log fetching timed out. The logs may be incomplete.\n\n"
+                )
+                self.set_header("X-Log-Timed-Out", "true")
             self.write(logs_text)
             self.finish()
 
