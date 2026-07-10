@@ -21,6 +21,7 @@ class LogsHandler(tornado.web.RequestHandler):
             hours = self.get_argument("hours", default="24")
             since = self.get_argument("since", default=hours)
             until = self.get_argument("until", default="0")
+            timeout = self.get_argument("timeout", default=None)
 
             try:
                 since = int(since)
@@ -34,8 +35,21 @@ class LogsHandler(tornado.web.RequestHandler):
                 self.set_status(400)
                 self.write("Invalid until parameter. Must be an integer.")
                 return
+            
+            try:
+                timeout = int(timeout) if timeout is not None else None
+            except ValueError:
+                self.set_status(400)
+                self.write("Invalid timeout parameter. Must be an integer.")
+                return
 
-            logs = LogCollector.fetch_logs(filter_param, since, until)
+            (logs, fetch_timed_out) = LogCollector.fetch_logs(filter_param, since, until, timeout)
+            if fetch_timed_out:
+                self.set_status(200)
+                self.write(
+                    "Warning: Log fetching timed out. The logs may be incomplete.\n\n"
+                )
+                self.set_header("X-Log-Timed-Out", "true")
             logs_text = LogCollector.format_logs_as_text(logs)
             self.write(logs_text)
             self.finish()

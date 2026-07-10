@@ -39,10 +39,10 @@ class ArchiveCollector:
 
             # Add logs for meticulous-backend service
             try:
-                backend_logs = LogCollector.fetch_logs("meticulous-backend", 24, 0)
+                (backend_logs, fetch_timed_out) = LogCollector.fetch_logs("meticulous-backend", 24, 0, timeout=180)
                 backend_logs_text = LogCollector.format_logs_as_text(backend_logs)
                 zipf.writestr(
-                    f"logs_meticulous-backend_{timestamp}.txt", backend_logs_text
+                    f"logs_meticulous-backend_{timestamp}{'_timed_out_possible_incomplete_logs' if fetch_timed_out else ''}.txt", backend_logs_text
                 )
             except Exception as e:
                 zipf.writestr(
@@ -52,9 +52,9 @@ class ArchiveCollector:
 
             # Add logs for meticulous-dial service
             try:
-                dial_logs = LogCollector.fetch_logs("meticulous-dial", 24, 0)
+                (dial_logs, fetch_timed_out) = LogCollector.fetch_logs("meticulous-dial", 24, 0, timeout=180)
                 dial_logs_text = LogCollector.format_logs_as_text(dial_logs)
-                zipf.writestr(f"logs_meticulous-dial_{timestamp}.txt", dial_logs_text)
+                zipf.writestr(f"logs_meticulous-dial_{timestamp}{'_timed_out_possible_incomplete_logs' if fetch_timed_out else ''}.txt", dial_logs_text)
             except Exception as e:
                 zipf.writestr(
                     f"logs_meticulous-dial_error_{timestamp}.txt",
