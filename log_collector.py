@@ -1,5 +1,8 @@
-from systemd import journal
 from datetime import datetime, timedelta
+
+from systemd import journal
+
+from log_redactor import DEFAULT_KEY_PATH, load_key, redact
 
 
 class LogCollector:
@@ -58,5 +61,22 @@ class LogCollector:
             raise Exception(f"Log fetching error: {e}")
 
     @staticmethod
-    def format_logs_as_text(logs):
-        return "\n".join([log["formatted"] for log in logs])
+    def format_logs_as_text(
+        logs, redaction_key=None, redaction_key_path=DEFAULT_KEY_PATH
+    ):
+        """Format and redact logs before they leave the watcher.
+
+        ``redaction_key`` is injectable for tests. Production callers load the
+        persistent per-device key from ``redaction_key_path``. Any key-loading
+        or redaction failure is deliberately allowed to propagate so request
+        and archive handlers fail closed.
+        """
+
+        logs_text = "\n".join(log["formatted"] for log in logs)
+        key = (
+            redaction_key
+            if redaction_key is not None
+            else load_key(redaction_key_path)
+        )
+        redacted_text, _ = redact(logs_text, key)
+        return redacted_text

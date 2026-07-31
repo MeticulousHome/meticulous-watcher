@@ -40,26 +40,31 @@ class ArchiveCollector:
             # Add logs for meticulous-backend service
             try:
                 backend_logs = LogCollector.fetch_logs("meticulous-backend", 24, 0)
-                backend_logs_text = LogCollector.format_logs_as_text(backend_logs)
-                zipf.writestr(
-                    f"logs_meticulous-backend_{timestamp}.txt", backend_logs_text
-                )
             except Exception as e:
                 zipf.writestr(
                     f"logs_meticulous-backend_error_{timestamp}.txt",
                     f"Error fetching backend logs: {str(e)}",
                 )
+            else:
+                # Keep redaction outside the collection exception handler:
+                # a redaction failure must abort archive creation, never fall
+                # back to an archive without safe logs.
+                backend_logs_text = LogCollector.format_logs_as_text(backend_logs)
+                zipf.writestr(
+                    f"logs_meticulous-backend_{timestamp}.txt", backend_logs_text
+                )
 
             # Add logs for meticulous-dial service
             try:
                 dial_logs = LogCollector.fetch_logs("meticulous-dial", 24, 0)
-                dial_logs_text = LogCollector.format_logs_as_text(dial_logs)
-                zipf.writestr(f"logs_meticulous-dial_{timestamp}.txt", dial_logs_text)
             except Exception as e:
                 zipf.writestr(
                     f"logs_meticulous-dial_error_{timestamp}.txt",
                     f"Error fetching dial logs: {str(e)}",
                 )
+            else:
+                dial_logs_text = LogCollector.format_logs_as_text(dial_logs)
+                zipf.writestr(f"logs_meticulous-dial_{timestamp}.txt", dial_logs_text)
 
             # Add status
             try:
