@@ -9,33 +9,45 @@ class LogCollector:
 
     @staticmethod
     def fetch_logs(
-        filter_unit="meticulous-backend.service", since_hours=24, until_hours=0
+        filter_units="meticulous-backend.service",
+        since_hours=24,
+        until_hours=0,
+        start_time=None,
+        end_time=None,
     ):
 
         try:
             j = journal.Reader()
-            j.log_level(journal.LOG_INFO)
+            # Match journalctl's default behavior: include every priority,
+            # including debug entries.
+            j.log_level(journal.LOG_DEBUG)
 
-            # Add filter for specific unit
-            if filter_unit != "*":
-                if not filter_unit.endswith(".service"):
-                    filter_unit += ".service"
+            if isinstance(filter_units, str):
+                filter_units = [filter_units]
+
+            normalized_units = []
+            if "*" not in filter_units:
+                for filter_unit in filter_units:
+                    if not filter_unit.endswith(".service"):
+                        filter_unit += ".service"
+                    if filter_unit not in normalized_units:
+                        normalized_units.append(filter_unit)
+
+            for index, filter_unit in enumerate(normalized_units):
+                if index > 0:
+                    j.add_disjunction()
                 j.add_match(_SYSTEMD_UNIT=filter_unit)
 
             # Set time range
-            j.seek_realtime(datetime.now() - timedelta(hours=since_hours))
-
-            if until_hours != 0:
-                until_ts = datetime.now() - timedelta(hours=until_hours)
-            else:
-                until_ts = datetime.now()
+            now = datetime.now().astimezone()
+            start_ts = start_time or now - timedelta(hours=since_hours)
+            until_ts = end_time or now - timedelta(hours=until_hours)
+            j.seek_realtime(start_ts)
+            until_timestamp = until_ts.timestamp()
 
             logs = []
             for entry in j:
-                if (
-                    until_hours != 0
-                    and entry["__REALTIME_TIMESTAMP"].timestamp() > until_ts.timestamp()
-                ):
+                if entry["__REALTIME_TIMESTAMP"].timestamp() >= until_timestamp:
                     break
 
                 time = entry.get("__REALTIME_TIMESTAMP", "Unknown Timestamp")
@@ -74,9 +86,7 @@ class LogCollector:
 
         logs_text = "\n".join(log["formatted"] for log in logs)
         key = (
-            redaction_key
-            if redaction_key is not None
-            else load_key(redaction_key_path)
+            redaction_key if redaction_key is not None else load_key(redaction_key_path)
         )
         redacted_text, _ = redact(logs_text, key)
         return redacted_text
