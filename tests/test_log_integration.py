@@ -1,5 +1,6 @@
 import unittest
 import zipfile
+from datetime import datetime
 from io import BytesIO
 from unittest import mock
 
@@ -53,6 +54,34 @@ class LogsHandlerTests(AsyncHTTPTestCase):
         self.assertEqual(response.code, 500)
         self.assertNotIn(b"HomeNet", response.body)
         self.assertNotIn(b"synthetic-password", response.body)
+
+    @mock.patch.object(LogCollector, "fetch_logs", return_value=[])
+    @mock.patch("log_collector.load_key", return_value=TEST_KEY)
+    def test_logs_endpoint_accepts_multiple_units_and_absolute_range(
+        self, _load_key, fetch_logs
+    ):
+        response = self.fetch(
+            "/logs?filter=meticulous-backend&filter=nginx"
+            "&start=2026-07-25T00%3A00%3A00-06%3A00"
+            "&end=2026-07-26T00%3A00%3A00-06%3A00"
+        )
+
+        self.assertEqual(response.code, 200)
+        fetch_logs.assert_called_once_with(
+            ["meticulous-backend", "nginx"],
+            start_time=datetime.fromisoformat("2026-07-25T00:00:00-06:00"),
+            end_time=datetime.fromisoformat("2026-07-26T00:00:00-06:00"),
+        )
+
+    def test_logs_endpoint_rejects_incomplete_absolute_range(self):
+        response = self.fetch("/logs?start=2026-07-25T00%3A00%3A00-06%3A00")
+
+        self.assertEqual(response.code, 400)
+
+    def test_logs_endpoint_rejects_invalid_relative_range(self):
+        response = self.fetch("/logs?since=1&until=2")
+
+        self.assertEqual(response.code, 400)
 
 
 class ArchiveRedactionTests(unittest.TestCase):
