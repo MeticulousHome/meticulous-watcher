@@ -1,3 +1,6 @@
 venv/
 repository-info.txt
 out
+__pycache__/
+*.py[cod]
+.pytest_cache/
