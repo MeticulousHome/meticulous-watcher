@@ -11,3 +11,7 @@ dependencies = [
     "systemd-python",
     "psutil",
 ]
+
+[tool.black]
+# Do not touch the submodule, it has its own formatter
+extend-exclude = "/log_redactor/"

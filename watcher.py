@@ -1,4 +1,5 @@
 from tornado.options import define, options, parse_command_line
+from datetime import datetime
 import tornado.web
 import tornado.ioloop
 import traceback
@@ -13,29 +14,66 @@ class LogsHandler(tornado.web.RequestHandler):
     def get(self):
         try:
             self.set_header("Content-Type", "text/plain")
+            self.set_header("Cache-Control", "no-store")
 
-            filter_param = self.get_argument(
-                "filter", default="meticulous-backend.service"
-            )
+            filter_params = self.get_arguments("filter")
+            if not filter_params:
+                filter_params = ["meticulous-backend.service"]
 
-            hours = self.get_argument("hours", default="24")
-            since = self.get_argument("since", default=hours)
-            until = self.get_argument("until", default="0")
+            start_param = self.get_argument("start", default=None)
+            end_param = self.get_argument("end", default=None)
 
-            try:
-                since = int(since)
-            except ValueError:
-                self.set_status(400)
-                self.write("Invalid since or hours parameter. Must be an integer.")
-                return
-            try:
-                until = int(until)
-            except ValueError:
-                self.set_status(400)
-                self.write("Invalid until parameter. Must be an integer.")
-                return
+            if start_param is not None or end_param is not None:
+                if start_param is None or end_param is None:
+                    self.set_status(400)
+                    self.write("Both start and end parameters are required.")
+                    return
 
-            logs = LogCollector.fetch_logs(filter_param, since, until)
+                try:
+                    start = datetime.fromisoformat(start_param)
+                    end = datetime.fromisoformat(end_param)
+                except ValueError:
+                    self.set_status(400)
+                    self.write("Invalid start or end parameter. Use ISO 8601.")
+                    return
+
+                if start.tzinfo is None or end.tzinfo is None:
+                    self.set_status(400)
+                    self.write("Start and end must include a timezone offset.")
+                    return
+
+                if start >= end:
+                    self.set_status(400)
+                    self.write("Start must be before end.")
+                    return
+
+                logs = LogCollector.fetch_logs(
+                    filter_params, start_time=start, end_time=end
+                )
+            else:
+                hours = self.get_argument("hours", default="24")
+                since = self.get_argument("since", default=hours)
+                until = self.get_argument("until", default="0")
+
+                try:
+                    since = int(since)
+                except ValueError:
+                    self.set_status(400)
+                    self.write("Invalid since or hours parameter. Must be an integer.")
+                    return
+                try:
+                    until = int(until)
+                except ValueError:
+                    self.set_status(400)
+                    self.write("Invalid until parameter. Must be an integer.")
+                    return
+
+                if since < 0 or until < 0 or since < until:
+                    self.set_status(400)
+                    self.write("Invalid time range.")
+                    return
+
+                logs = LogCollector.fetch_logs(filter_params, since, until)
             logs_text = LogCollector.format_logs_as_text(logs)
             self.write(logs_text)
             self.finish()

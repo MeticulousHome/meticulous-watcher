@@ -36,7 +36,8 @@ RUN chmod 755 /pkg/DEBIAN/postinst /pkg/usr/bin/meticulous-watcher
 
 # Create application directories
 RUN mkdir -p opt/meticulous-watcher-venv \
-    opt/meticulous-watcher
+    opt/meticulous-watcher \
+    opt/meticulous-watcher/log_redactor
 
 # Copy the venv from builder
 COPY --from=builder /opt/meticulous-watcher-venv /pkg/opt/meticulous-watcher-venv
@@ -44,6 +45,10 @@ COPY --from=builder /opt/meticulous-watcher-venv /pkg/opt/meticulous-watcher-ven
 # Copy application source
 COPY *.py /pkg/opt/meticulous-watcher/
 COPY pyproject.toml /pkg/opt/meticulous-watcher/
+
+# Also copy the log_redactor submodule code as previous copies ignore it
+# (they only copy files from the project and not directories)
+COPY log_redactor/*.py /pkg/opt/meticulous-watcher/log_redactor/
 
 # Build the .deb
 RUN mkdir -p /out && dpkg-deb --build /pkg /out/meticulous-watcher_${VERSION}_${ARCH}.deb
