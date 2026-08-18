@@ -1,12 +1,13 @@
 from tornado.options import define, options, parse_command_line
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+import threading
 import tornado.web
 import tornado.ioloop
 import traceback
 import sdnotify
 
-from log_collector import LogCollector
+from log_collector import ClientGone, LogCollector
 from status_collector import StatusCollector
 from archive_collector import ArchiveCollector
 
@@ -19,10 +20,6 @@ from archive_collector import ArchiveCollector
 COLLECTOR_POOL = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="watcher-collector"
 )
-
-
-class ClientGone(Exception):
-    """The client vanished before its work reached the front of the queue."""
 
 
 class CollectorHandler(tornado.web.RequestHandler):
@@ -42,23 +39,41 @@ class CollectorHandler(tornado.web.RequestHandler):
 
     def initialize(self):
         self.client_disconnected = False
+        # Purpose-built cross-thread signal for the deep, in-collection
+        # cancellation checks (LogCollector.fetch_logs, redact). Those run in
+        # COLLECTOR_POOL, not on the IOLoop that delivers on_connection_close,
+        # so they read this Event rather than the client_disconnected
+        # attribute above: Event.set()/is_set() is the documented primitive
+        # for that cross-thread handoff, not an attribute read relying on GIL
+        # happenstance.
+        self._client_gone = threading.Event()
 
     def on_connection_close(self):
         super().on_connection_close()
         self.client_disconnected = True
+        self._client_gone.set()
 
-    async def run_off_loop(self, func, *args):
+    async def run_off_loop(self, func, *args, cancellable=False):
         """Run ``func`` in the collector pool, skipping it if the client left.
 
         A thread already running cannot be cancelled, but anything still queued
         behind it can be dropped. That is what stops a client that times out and
         retries from stacking up several full collections, each of which would
         otherwise run to completion for nobody.
+
+        When ``cancellable`` is True, ``func`` is additionally called with a
+        ``cancelled`` keyword argument: a zero-argument callable reporting True
+        once this handler's client has disconnected. Work that opts in is
+        expected to check it periodically and abandon by raising ClientGone;
+        handlers whose work is a single opaque call (StatusHandler,
+        ArchiveHandler) do not opt in and are unaffected.
         """
 
         def guarded():
             if self.client_disconnected:
                 raise ClientGone()
+            if cancellable:
+                return func(*args, cancelled=self._client_gone.is_set)
             return func(*args)
 
         return await tornado.ioloop.IOLoop.current().run_in_executor(
@@ -129,15 +144,18 @@ class LogsHandler(CollectorHandler):
 
                 fetch_kwargs = {"since_hours": since, "until_hours": until}
 
-            def collect():
+            def collect(cancelled):
                 # Fetch and format in the same worker call: the entry list is
                 # the largest object in flight and there is no reason to hand
                 # it back to the IOLoop thread between the two steps.
                 return LogCollector.format_logs_as_text(
-                    LogCollector.fetch_logs(filter_params, **fetch_kwargs)
+                    LogCollector.fetch_logs(
+                        filter_params, cancelled=cancelled, **fetch_kwargs
+                    ),
+                    cancelled=cancelled,
                 )
 
-            logs_text = await self.run_off_loop(collect)
+            logs_text = await self.run_off_loop(collect, cancellable=True)
             self.write(logs_text)
             self.finish()
 

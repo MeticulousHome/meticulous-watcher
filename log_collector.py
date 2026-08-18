@@ -2,7 +2,27 @@ from datetime import datetime, timedelta
 
 from systemd import journal
 
-from log_redactor import DEFAULT_KEY_PATH, load_key, redact
+from log_redactor import DEFAULT_KEY_PATH, RedactionCancelled, load_key, redact
+
+
+class ClientGone(Exception):
+    """The client vanished before or during its collection work.
+
+    Raised by CollectorHandler.run_off_loop's pre-flight check (in
+    watcher.py) when a request was still queued when its client
+    disconnected, and from here by fetch_logs / format_logs_as_text when the
+    client disconnects while a collection is already running. Defined in
+    this module rather than watcher.py -- which imports it from here -- so
+    LogCollector can raise it directly without an import cycle: watcher.py
+    already imports LogCollector, so the reverse import cannot exist too.
+    """
+
+
+# "A few hundred iterations" per the design this implements: frequent enough
+# that an aborted fetch stops within a fraction of a second of being
+# signalled, rare enough that the check itself never shows up against a
+# >100k-entry journal walk.
+_CANCEL_CHECK_INTERVAL = 500
 
 
 class LogCollector:
@@ -14,6 +34,7 @@ class LogCollector:
         until_hours=0,
         start_time=None,
         end_time=None,
+        cancelled=None,
     ):
 
         try:
@@ -46,7 +67,14 @@ class LogCollector:
             until_timestamp = until_ts.timestamp()
 
             logs = []
-            for entry in j:
+            for entry_index, entry in enumerate(j):
+                if (
+                    cancelled is not None
+                    and entry_index % _CANCEL_CHECK_INTERVAL == 0
+                    and cancelled()
+                ):
+                    raise ClientGone()
+
                 if entry["__REALTIME_TIMESTAMP"].timestamp() >= until_timestamp:
                     break
 
@@ -69,12 +97,14 @@ class LogCollector:
 
             return logs
 
+        except ClientGone:
+            raise
         except Exception as e:
             raise Exception(f"Log fetching error: {e}")
 
     @staticmethod
     def format_logs_as_text(
-        logs, redaction_key=None, redaction_key_path=DEFAULT_KEY_PATH
+        logs, redaction_key=None, redaction_key_path=DEFAULT_KEY_PATH, cancelled=None
     ):
         """Format and redact logs before they leave the watcher.
 
@@ -82,11 +112,19 @@ class LogCollector:
         persistent per-device key from ``redaction_key_path``. Any key-loading
         or redaction failure is deliberately allowed to propagate so request
         and archive handlers fail closed.
+
+        ``cancelled``, if given, is forwarded to ``redact()``. The
+        ``RedactionCancelled`` it can raise is translated to ``ClientGone``
+        here, so every caller of this module only ever needs to watch for one
+        cancellation exception.
         """
 
         logs_text = "\n".join(log["formatted"] for log in logs)
         key = (
             redaction_key if redaction_key is not None else load_key(redaction_key_path)
         )
-        redacted_text, _ = redact(logs_text, key)
+        try:
+            redacted_text, _ = redact(logs_text, key, cancelled=cancelled)
+        except RedactionCancelled:
+            raise ClientGone() from None
         return redacted_text
