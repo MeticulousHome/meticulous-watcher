@@ -1,3 +1,4 @@
+import threading
 import unittest
 import zipfile
 from datetime import datetime
@@ -8,7 +9,7 @@ import tornado.web
 from tornado.testing import AsyncHTTPTestCase
 
 from archive_collector import ArchiveCollector
-from log_collector import LogCollector
+from log_collector import ClientGone, LogCollector
 from watcher import LogsHandler
 
 
@@ -69,6 +70,10 @@ class LogsHandlerTests(AsyncHTTPTestCase):
         self.assertEqual(response.code, 200)
         fetch_logs.assert_called_once_with(
             ["meticulous-backend", "nginx"],
+            # A live cancellation predicate accompanies every fetch now --
+            # see LogsHandlerCancellationTests below for what it is and how
+            # it is used.
+            cancelled=mock.ANY,
             start_time=datetime.fromisoformat("2026-07-25T00:00:00-06:00"),
             end_time=datetime.fromisoformat("2026-07-26T00:00:00-06:00"),
         )
@@ -82,6 +87,34 @@ class LogsHandlerTests(AsyncHTTPTestCase):
         response = self.fetch("/logs?since=1&until=2")
 
         self.assertEqual(response.code, 400)
+
+
+class LogsHandlerCancellationTests(AsyncHTTPTestCase):
+    def get_app(self):
+        return tornado.web.Application([(r"/logs", LogsHandler)])
+
+    @mock.patch.object(LogCollector, "fetch_logs")
+    def test_disconnect_mid_collection_completes_without_writing_body(self, fetch_logs):
+        """LogsHandler wires run_off_loop(cancellable=True) through to
+        LogCollector.fetch_logs. If the collection observes the client is
+        gone and abandons via ClientGone, the request must complete quietly:
+        no response body, no error surfaced to Tornado."""
+
+        def observe_predicate_then_abandon(*_args, cancelled=None, **_kwargs):
+            # run_off_loop must supply a live predicate backed by the
+            # purpose-built Event -- not a plain attribute read -- and it
+            # must read "not disconnected" before anything happens.
+            self.assertIsNotNone(cancelled)
+            self.assertIsInstance(cancelled.__self__, threading.Event)
+            self.assertFalse(cancelled())
+            raise ClientGone()
+
+        fetch_logs.side_effect = observe_predicate_then_abandon
+
+        response = self.fetch("/logs")
+
+        self.assertEqual(response.code, 200)
+        self.assertEqual(response.body, b"")
 
 
 class ArchiveRedactionTests(unittest.TestCase):
