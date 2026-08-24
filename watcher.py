@@ -1,17 +1,88 @@
 from tornado.options import define, options, parse_command_line
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
+import threading
 import tornado.web
 import tornado.ioloop
 import traceback
 import sdnotify
 
-from log_collector import LogCollector
+from log_collector import ClientGone, LogCollector
 from status_collector import StatusCollector
 from archive_collector import ArchiveCollector
 
+# One worker on purpose. Collection is almost entirely GIL-holding work --
+# regex passes in the redactor, per-field entry conversion in systemd-python --
+# so extra threads buy no parallelism, they only multiply peak memory: a 24h
+# "filter=*" fetch already holds the journal entries, the joined text and the
+# redacted copy at once. IOLoop.run_in_executor's default pool is
+# cpu_count() * 5 threads, which is exactly the wrong shape for this workload.
+COLLECTOR_POOL = ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="watcher-collector"
+)
 
-class LogsHandler(tornado.web.RequestHandler):
-    def get(self):
+
+class CollectorHandler(tornado.web.RequestHandler):
+    """Base for handlers whose work is too slow to run on the IOLoop.
+
+    Collection blocks for a long time: a 24h ``filter=*`` fetch walks the whole
+    journal and then redacts megabytes of text. Run inline it froze the single
+    IOLoop, so Tornado could not accept connections, could not notice that a
+    client had given up, and could not cancel anything -- every request queued
+    behind it still ran to completion for a client that was long gone, which is
+    why CPU stayed pinned for minutes after a request "finished".
+
+    Moving the work to a thread keeps the loop free, which is what makes
+    on_connection_close fire at all: it is delivered by the same loop the work
+    used to block.
+    """
+
+    def initialize(self):
+        self.client_disconnected = False
+        # Purpose-built cross-thread signal for the deep, in-collection
+        # cancellation checks (LogCollector.fetch_logs, redact). Those run in
+        # COLLECTOR_POOL, not on the IOLoop that delivers on_connection_close,
+        # so they read this Event rather than the client_disconnected
+        # attribute above: Event.set()/is_set() is the documented primitive
+        # for that cross-thread handoff, not an attribute read relying on GIL
+        # happenstance.
+        self._client_gone = threading.Event()
+
+    def on_connection_close(self):
+        super().on_connection_close()
+        self.client_disconnected = True
+        self._client_gone.set()
+
+    async def run_off_loop(self, func, *args, cancellable=False):
+        """Run ``func`` in the collector pool, skipping it if the client left.
+
+        A thread already running cannot be cancelled, but anything still queued
+        behind it can be dropped. That is what stops a client that times out and
+        retries from stacking up several full collections, each of which would
+        otherwise run to completion for nobody.
+
+        When ``cancellable`` is True, ``func`` is additionally called with a
+        ``cancelled`` keyword argument: a zero-argument callable reporting True
+        once this handler's client has disconnected. Work that opts in is
+        expected to check it periodically and abandon by raising ClientGone;
+        handlers whose work is a single opaque call (StatusHandler,
+        ArchiveHandler) do not opt in and are unaffected.
+        """
+
+        def guarded():
+            if self.client_disconnected:
+                raise ClientGone()
+            if cancellable:
+                return func(*args, cancelled=self._client_gone.is_set)
+            return func(*args)
+
+        return await tornado.ioloop.IOLoop.current().run_in_executor(
+            COLLECTOR_POOL, guarded
+        )
+
+
+class LogsHandler(CollectorHandler):
+    async def get(self):
         try:
             self.set_header("Content-Type", "text/plain")
             self.set_header("Cache-Control", "no-store")
@@ -47,9 +118,7 @@ class LogsHandler(tornado.web.RequestHandler):
                     self.write("Start must be before end.")
                     return
 
-                logs = LogCollector.fetch_logs(
-                    filter_params, start_time=start, end_time=end
-                )
+                fetch_kwargs = {"start_time": start, "end_time": end}
             else:
                 hours = self.get_argument("hours", default="24")
                 since = self.get_argument("since", default=hours)
@@ -73,33 +142,51 @@ class LogsHandler(tornado.web.RequestHandler):
                     self.write("Invalid time range.")
                     return
 
-                logs = LogCollector.fetch_logs(filter_params, since, until)
-            logs_text = LogCollector.format_logs_as_text(logs)
+                fetch_kwargs = {"since_hours": since, "until_hours": until}
+
+            def collect(cancelled):
+                # Fetch and format in the same worker call: the entry list is
+                # the largest object in flight and there is no reason to hand
+                # it back to the IOLoop thread between the two steps.
+                return LogCollector.format_logs_as_text(
+                    LogCollector.fetch_logs(
+                        filter_params, cancelled=cancelled, **fetch_kwargs
+                    ),
+                    cancelled=cancelled,
+                )
+
+            logs_text = await self.run_off_loop(collect, cancellable=True)
             self.write(logs_text)
             self.finish()
 
+        except ClientGone:
+            return
         except Exception as e:
             self.set_status(500)
             self.write(f"Log fetching error: {e}")
 
 
-class StatusHandler(tornado.web.RequestHandler):
-    def get(self):
+class StatusHandler(CollectorHandler):
+    async def get(self):
         try:
             self.set_header("Content-Type", "application/json")
-            system_status = StatusCollector.get_system_status()
+            system_status = await self.run_off_loop(StatusCollector.get_system_status)
             self.write(system_status)
             self.finish()
+        except ClientGone:
+            return
         except Exception as e:
             self.set_status(500)
             self.write({"error": f"Status collection error: {e}"})
 
 
-class ArchiveHandler(tornado.web.RequestHandler):
+class ArchiveHandler(CollectorHandler):
     async def get(self):
         try:
             # Create the archive with all data
-            zip_data, zip_filename = ArchiveCollector.create_archive()
+            zip_data, zip_filename = await self.run_off_loop(
+                ArchiveCollector.create_archive
+            )
 
             # Set headers for file download
             self.set_header("Content-Type", "application/zip")
@@ -117,6 +204,8 @@ class ArchiveHandler(tornado.web.RequestHandler):
 
             self.finish()
 
+        except ClientGone:
+            return
         except Exception as e:
             self.set_status(500)
             self.write(f"Archive creation error: {e}")
