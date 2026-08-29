@@ -7,6 +7,7 @@ import tornado.ioloop
 import traceback
 import sdnotify
 
+from auth import AuthMixin
 from log_collector import ClientGone, LogCollector
 from status_collector import StatusCollector
 from archive_collector import ArchiveCollector
@@ -21,8 +22,7 @@ COLLECTOR_POOL = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="watcher-collector"
 )
 
-
-class CollectorHandler(tornado.web.RequestHandler):
+class CollectorHandler(AuthMixin, tornado.web.RequestHandler):
     """Base for handlers whose work is too slow to run on the IOLoop.
 
     Collection blocks for a long time: a 24h ``filter=*`` fetch walks the whole
