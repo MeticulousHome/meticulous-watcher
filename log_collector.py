@@ -79,13 +79,12 @@ class LogCollector:
                 if entry_index % _CANCEL_CHECK_INTERVAL == 0:
                     if cancelled is not None and cancelled():
                         raise ClientGone()
-                    if (
-                        bound_timeout is not None
-                        and sys_time.monotonic() - start_monotonic_time
-                        >= bound_timeout
-                    ):
-                        timed_out = True
-                        break
+                if (
+                    bound_timeout is not None
+                    and sys_time.monotonic() - start_monotonic_time >= bound_timeout
+                ):
+                    timed_out = True
+                    break
 
                 if entry["__REALTIME_TIMESTAMP"].timestamp() >= until_timestamp:
                     break

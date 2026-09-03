@@ -22,6 +22,7 @@ COLLECTOR_POOL = ThreadPoolExecutor(
     max_workers=1, thread_name_prefix="watcher-collector"
 )
 
+
 class CollectorHandler(AuthMixin, tornado.web.RequestHandler):
     """Base for handlers whose work is too slow to run on the IOLoop.
 
@@ -47,6 +48,12 @@ class CollectorHandler(AuthMixin, tornado.web.RequestHandler):
         # for that cross-thread handoff, not an attribute read relying on GIL
         # happenstance.
         self._client_gone = threading.Event()
+
+    def set_default_headers(self):
+        # Diagnostic responses can contain sensitive machine state. Apply the
+        # policy centrally so success, validation errors and authorization
+        # failures from every collector route are all non-cacheable.
+        self.set_header("Cache-Control", "no-store")
 
     def on_connection_close(self):
         super().on_connection_close()
@@ -81,80 +88,69 @@ class CollectorHandler(AuthMixin, tornado.web.RequestHandler):
         )
 
 
+def _parse_timeout(handler):
+    timeout_param = handler.get_argument("timeout", default=None)
+    try:
+        timeout = int(timeout_param) if timeout_param is not None else None
+    except ValueError as error:
+        raise ValueError("Invalid timeout parameter. Must be an integer.") from error
+    if timeout is not None and timeout <= 0:
+        raise ValueError("Invalid timeout parameter. Must be greater than zero.")
+    return timeout
+
+
+def _parse_log_range(handler):
+    start_param = handler.get_argument("start", default=None)
+    end_param = handler.get_argument("end", default=None)
+
+    if start_param is not None or end_param is not None:
+        if start_param is None or end_param is None:
+            raise ValueError("Both start and end parameters are required.")
+        try:
+            start = datetime.fromisoformat(start_param)
+            end = datetime.fromisoformat(end_param)
+        except ValueError as error:
+            raise ValueError("Invalid start or end parameter. Use ISO 8601.") from error
+        if start.tzinfo is None or end.tzinfo is None:
+            raise ValueError("Start and end must include a timezone offset.")
+        if start >= end:
+            raise ValueError("Start must be before end.")
+        return {"start_time": start, "end_time": end}
+
+    hours = handler.get_argument("hours", default="24")
+    since_param = handler.get_argument("since", default=hours)
+    until_param = handler.get_argument("until", default="0")
+    try:
+        since = int(since_param)
+    except ValueError as error:
+        raise ValueError(
+            "Invalid since or hours parameter. Must be an integer."
+        ) from error
+    try:
+        until = int(until_param)
+    except ValueError as error:
+        raise ValueError("Invalid until parameter. Must be an integer.") from error
+    if since < 0 or until < 0 or since < until:
+        raise ValueError("Invalid time range.")
+    return {"since_hours": since, "until_hours": until}
+
+
 class LogsHandler(CollectorHandler):
     async def get(self):
         try:
             self.set_header("Content-Type", "text/plain")
-            self.set_header("Cache-Control", "no-store")
 
             filter_params = self.get_arguments("filter")
             if not filter_params:
                 filter_params = ["meticulous-backend.service"]
 
-            timeout_param = self.get_argument("timeout", default=None)
             try:
-                timeout = int(timeout_param) if timeout_param is not None else None
-            except ValueError:
+                timeout = _parse_timeout(self)
+                fetch_kwargs = _parse_log_range(self)
+            except ValueError as error:
                 self.set_status(400)
-                self.write("Invalid timeout parameter. Must be an integer.")
+                self.write(str(error))
                 return
-            if timeout is not None and timeout <= 0:
-                self.set_status(400)
-                self.write("Invalid timeout parameter. Must be greater than zero.")
-                return
-
-            start_param = self.get_argument("start", default=None)
-            end_param = self.get_argument("end", default=None)
-
-            if start_param is not None or end_param is not None:
-                if start_param is None or end_param is None:
-                    self.set_status(400)
-                    self.write("Both start and end parameters are required.")
-                    return
-
-                try:
-                    start = datetime.fromisoformat(start_param)
-                    end = datetime.fromisoformat(end_param)
-                except ValueError:
-                    self.set_status(400)
-                    self.write("Invalid start or end parameter. Use ISO 8601.")
-                    return
-
-                if start.tzinfo is None or end.tzinfo is None:
-                    self.set_status(400)
-                    self.write("Start and end must include a timezone offset.")
-                    return
-
-                if start >= end:
-                    self.set_status(400)
-                    self.write("Start must be before end.")
-                    return
-
-                fetch_kwargs = {"start_time": start, "end_time": end}
-            else:
-                hours = self.get_argument("hours", default="24")
-                since = self.get_argument("since", default=hours)
-                until = self.get_argument("until", default="0")
-
-                try:
-                    since = int(since)
-                except ValueError:
-                    self.set_status(400)
-                    self.write("Invalid since or hours parameter. Must be an integer.")
-                    return
-                try:
-                    until = int(until)
-                except ValueError:
-                    self.set_status(400)
-                    self.write("Invalid until parameter. Must be an integer.")
-                    return
-
-                if since < 0 or until < 0 or since < until:
-                    self.set_status(400)
-                    self.write("Invalid time range.")
-                    return
-
-                fetch_kwargs = {"since_hours": since, "until_hours": until}
 
             def collect(cancelled):
                 # Fetch and format in the same worker call: the entry list is
