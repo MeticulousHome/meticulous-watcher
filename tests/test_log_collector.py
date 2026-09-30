@@ -69,7 +69,8 @@ class FetchLogsCancellationTests(unittest.TestCase):
             with_predicate = LogCollector.fetch_logs(cancelled=lambda: False)
 
         self.assertEqual(baseline, with_predicate)
-        self.assertEqual(len(with_predicate), 1200)
+        self.assertEqual(len(with_predicate[0]), 1200)
+        self.assertFalse(with_predicate[1])
 
     def test_predicate_that_signals_part_way_raises_client_gone(self):
         reader = FakeJournalReader(_entries(1200))
@@ -86,6 +87,19 @@ class FetchLogsCancellationTests(unittest.TestCase):
         # Abandoned well short of the full 1200 -- the whole point is not
         # paying for entries after the client left.
         self.assertLess(reader.consumed, 1200)
+
+    def test_timeout_stops_collection_and_marks_result_incomplete(self):
+        reader = FakeJournalReader(_entries(10))
+
+        with (
+            mock.patch("log_collector.journal.Reader", return_value=reader),
+            mock.patch("log_collector.sys_time.monotonic", side_effect=[0.0, 0.5, 1.0]),
+        ):
+            logs, timed_out = LogCollector.fetch_logs(timeout=1)
+
+        self.assertTrue(timed_out)
+        self.assertEqual(len(logs), 1)
+        self.assertEqual(reader.consumed, 2)
 
 
 if __name__ == "__main__":

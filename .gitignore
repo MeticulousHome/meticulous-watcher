@@ -1,4 +1,5 @@
 venv/
+.venv/
 repository-info.txt
 out
 __pycache__/
