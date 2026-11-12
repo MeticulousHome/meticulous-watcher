@@ -229,7 +229,9 @@ def main():
             ],
         )
 
-        app.listen(options.port)
+        # Loopback only: nginx serves these under /health/* behind device
+        # auth, so the LAN must not be able to reach the watcher directly.
+        app.listen(options.port, address="127.0.0.1")
 
         # Notify that it is ready
         notifier.notify("READY=1")
